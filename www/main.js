@@ -1,9 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════
-// CellForge — main.js
+// Forma — main.js
 // WebGL2 rendering, UI wiring, interaction, game loop
 // ═══════════════════════════════════════════════════════════════════════
 
-import init, { Simulation } from './pkg/cellforge.js?v=theme2';
+import init, { Simulation } from './pkg/forma.js?v=theme2';
 
 // ── Globals ────────────────────────────────────────────────────────────
 let sim = null;
@@ -1126,7 +1126,7 @@ function wireUI() {
         canvas.toBlob(blob => {
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `cellforge-gen${Number(sim.get_generation())}.png`;
+            a.download = `forma-gen${Number(sim.get_generation())}.png`;
             a.click();
             URL.revokeObjectURL(a.href);
         });
@@ -1448,7 +1448,7 @@ function gameLoop(timestamp) {
 // ═══════════════════════════════════════════════════════════════════════
 
 async function main() {
-    wasmExports = await init({ module_or_path: new URL('./pkg/cellforge_bg.wasm?v=theme2', import.meta.url) });
+    wasmExports = await init({ module_or_path: new URL('./pkg/forma_bg.wasm?v=theme2', import.meta.url) });
     wasmMemory = wasmExports;
 
     sim = new Simulation();

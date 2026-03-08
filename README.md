@@ -1,4 +1,4 @@
-# CellForge — Cellular Automata Sandbox
+# Forma — Cellular Automata Sandbox
 
 An interactive cellular automata sandbox running in the browser. The simulation core is written in **Rust compiled to WebAssembly**, giving it raw performance to simulate a 1024×1024 grid at 60fps. The frontend is plain **HTML + CSS + Canvas/WebGL2** - no frameworks.
 
@@ -55,7 +55,7 @@ This repo uses GitHub Actions to build wasm and deploy Pages automatically from 
 
 ## Project Structure
 ```
-cellforge/
+forma/
 ├── Cargo.toml          # Rust crate config
 ├── src/
 │   └── lib.rs          # Rust/WASM simulation core

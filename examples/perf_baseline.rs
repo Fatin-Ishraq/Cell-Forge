@@ -1,4 +1,4 @@
-use cellforge::Simulation;
+use forma::Simulation;
 use std::time::Instant;
 
 struct Case<'a> {
@@ -64,7 +64,7 @@ fn run_case(case: &Case) {
 }
 
 fn main() {
-    println!("CellForge core baseline benchmark");
+    println!("Forma core baseline benchmark");
     println!("grid: 1024x1024, release build");
     println!();
 
