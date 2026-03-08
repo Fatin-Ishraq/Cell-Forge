@@ -1,0 +1,21 @@
+[package]
+name = "forma-wallpaper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
+
+[target.'cfg(windows)'.dependencies]
+tao = "0.30"
+wry = "0.46"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
+tray-icon = "0.19"

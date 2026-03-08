@@ -1,11 +1,29 @@
+# Build outputs
 /target
+**/target/
 /pkg
 /www/pkg
-/node_modules
 /dist
+
+# Dependency folders
+/node_modules
+
+# IDE/editor
 /.vs
 /.idea
 /.vscode
+*.swp
+*.swo
+
+# OS junk
 .DS_Store
+Thumbs.db
+
+# Local benchmarking and logs
 /benchmark
+*.log
+*.tmp
+*.bak
+
+# Optional local docs scratch
 /docs

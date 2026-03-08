@@ -134,7 +134,7 @@ body.presentation #about-modal {
     display: none !important;
 }
 
-body.presentation {
+body.presentation:not(.wallpaper-session) {
     cursor: none;
 }
 
@@ -150,6 +150,10 @@ body.presentation {
 
 body.presentation #btn-exit-view {
     display: inline-flex;
+}
+
+body.wallpaper-session #btn-exit-view {
+    display: none !important;
 }
 
 #mobile-sheet-backdrop {

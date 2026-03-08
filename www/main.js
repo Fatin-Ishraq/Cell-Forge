@@ -4,6 +4,17 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import init, { Simulation } from './pkg/forma.js?v=theme2';
+import { createDesktopHostBridge } from './desktop-host.js';
+import { AMBIENT_SCENES, CONWAY_PRESETS, GEN_PRESETS, THEMES } from './presets.js';
+import { BLOOM_FRAG, BLOOM_VERT, FRAG_SRC, VERT_SRC } from './shaders.js';
+
+const desktopHost = createDesktopHostBridge({
+    onApplyConfig: applyDesktopConfig,
+    onWallpaperSession: setWallpaperSessionActive,
+    onViewportActive: setDesktopViewportActive,
+    onPowerState: setDesktopPowerState,
+    onCursorMove: applyDesktopCursorMove,
+});
 
 // ── Globals ────────────────────────────────────────────────────────────
 let sim = null;
@@ -28,12 +39,23 @@ let lastFrameTime = 0;
 let needsUpload = true; // dirty flag: only upload pixels when something changed
 let needsRender = true;
 let statsDirty = true;
+let desktopPendingConfig = null;
+let wallpaperSessionActive = false;
+let desktopViewportActive = true;
+let desktopOnBattery = false;
+let loopSuspended = false;
+let batteryEcoResolutionActive = false;
+let batteryEcoBaseResolution = null;
+let hostCursorLast = null;
 
 // Brush state
 let brushSize = 4;
 let brushShape = 'square'; // square, circle, spray
 let paintState = 1;
+let generationsCount = 3;
 let currentMode = 0; // start in Conway
+let selectedConwayPreset = 'life';
+let selectedGenerationsPreset = 'starwars';
 let squareBrushBuffer = new Uint8Array(brushSize * brushSize);
 let squareBrushFillState = paintState;
 squareBrushBuffer.fill(paintState);
@@ -60,6 +82,7 @@ let simResolution = 1024;
 const GRID_TIERS = [384, 512, 640, 768, 896, 1024, 1280];
 const RES_STORAGE_MODE_KEY = 'forma_sim_res_mode';
 const RES_STORAGE_VALUE_KEY = 'forma_sim_res_value';
+const DESKTOP_RULE_STATE_KEY = 'forma_desktop_rule_state_v1';
 let resolutionMode = 'auto';
 let autoTargetResolution = 1024;
 let adaptiveLowFpsMs = 0;
@@ -70,6 +93,7 @@ const ADAPTIVE_HIGH_FPS = 58;
 const ADAPTIVE_LOW_WINDOW_MS = 6500;
 const ADAPTIVE_HIGH_WINDOW_MS = 22000;
 const ADAPTIVE_COOLDOWN_MS = 12000;
+const BATTERY_WALLPAPER_FPS_CAP = 20;
 
 // FPS tracking
 const fpsSamples = new Array(60).fill(16.67);
@@ -101,42 +125,6 @@ let wasmPixelsBuffer = null;
 let wasmPixelsPtr = -1;
 let wasmPixelsLen = -1;
 
-// ── Presets ─────────────────────────────────────────────────────────────
-const CONWAY_PRESETS = {
-    life: { b: (1 << 3), s: (1 << 2) | (1 << 3), speed: 24 },
-    highlife: { b: (1 << 3) | (1 << 6), s: (1 << 2) | (1 << 3), speed: 22 },
-    daynight: { b: (1 << 3) | (1 << 6) | (1 << 7) | (1 << 8), s: (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8), speed: 18 },
-    seeds: { b: (1 << 2), s: 0, speed: 30 },
-    maze: { b: (1 << 3), s: (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5), speed: 12 },
-    replicator: { b: (1 << 1) | (1 << 3) | (1 << 5) | (1 << 7), s: (1 << 1) | (1 << 3) | (1 << 5) | (1 << 7), speed: 20 },
-    '34life': { b: (1 << 3) | (1 << 4), s: (1 << 3) | (1 << 4), speed: 18 },
-};
-
-const GEN_PRESETS = {
-    brians: { b: (1 << 2), s: 0, states: 3, speed: 22 },
-    starwars: { b: (1 << 2), s: (1 << 3) | (1 << 4) | (1 << 5), states: 4, speed: 18 },
-    fireworld: { b: (1 << 2), s: (1 << 3) | (1 << 4), states: 8, speed: 14 },
-    pulse: { b: (1 << 2), s: 0, states: 4, speed: 20 },
-    dune: { b: (1 << 2), s: (1 << 2) | (1 << 3), states: 6, speed: 16 },
-    tides: { b: (1 << 2), s: (1 << 3) | (1 << 4) | (1 << 6), states: 8, speed: 14 },
-    frost: { b: (1 << 2), s: (1 << 1) | (1 << 2) | (1 << 5), states: 9, speed: 12 },
-    lattice: { b: (1 << 3) | (1 << 4), s: (1 << 2) | (1 << 3) | (1 << 4), states: 6, speed: 16 },
-    echo: { b: (1 << 2), s: (1 << 2) | (1 << 4), states: 10, speed: 12 },
-    cathedral: { b: (1 << 2), s: (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4), states: 16, speed: 8 },
-};
-
-const THEMES = [
-    { name: 'Lab', bodyTheme: 'lab', bloom: true, bloomStrength: 0.34 },
-    { name: 'Ember', bodyTheme: 'ember', bloom: true, bloomStrength: 0.54 },
-    { name: 'Bio', bodyTheme: 'bio', bloom: true, bloomStrength: 0.28 },
-    { name: 'Mono', bodyTheme: 'mono', bloom: false, bloomStrength: 0.0 },
-];
-
-const AMBIENT_SCENES = [
-    { mode: 0, preset: 'maze', theme: 2, density: 0.18, seed: 4201, speed: 6, zoom: 1.55 },
-    { mode: 0, preset: 'highlife', theme: 0, density: 0.08, seed: 7331, speed: 8, zoom: 1.25 },
-    { mode: 1, preset: 'starwars', theme: 3, density: 0.06, seed: 1887, speed: 7, zoom: 1.4 },
-];
 const AMBIENT_MOTION_INTERVAL_MS = 66;
 const AMBIENT_HEALTH_INTERVAL_MS = 1000;
 const IDLE_FRAME_DELAY_MS = 180;
@@ -144,57 +132,6 @@ const IDLE_FRAME_DELAY_MS = 180;
 // ═══════════════════════════════════════════════════════════════════════
 // WebGL Setup
 // ═══════════════════════════════════════════════════════════════════════
-
-const VERT_SRC = `#version 300 es
-in vec2 a_pos;
-out vec2 v_uv;
-uniform vec2 u_pan;
-uniform float u_zoom;
-uniform vec2 u_resolution;
-void main() {
-    vec2 world = a_pos / u_zoom + u_pan;
-    v_uv = world * 0.5 + 0.5;
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
-
-const FRAG_SRC = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 fragColor;
-uniform sampler2D u_tex;
-void main() {
-    vec2 uv = fract(v_uv); // toroidal wrap
-    fragColor = texture(u_tex, uv);
-}`;
-
-// Bloom shaders
-const BLOOM_FRAG = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-out vec4 fragColor;
-uniform sampler2D u_tex;
-uniform vec2 u_dir;
-uniform vec2 u_texSize;
-void main() {
-    vec2 uv = fract(v_uv);
-    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
-    vec3 result = texture(u_tex, uv).rgb * weights[0];
-    vec2 texel = u_dir / u_texSize;
-    for (int i = 1; i < 5; i++) {
-        result += texture(u_tex, uv + texel * float(i)).rgb * weights[i];
-        result += texture(u_tex, uv - texel * float(i)).rgb * weights[i];
-    }
-    fragColor = vec4(result, 1.0);
-}`;
-
-// Simple passthrough vertex for bloom
-const BLOOM_VERT = `#version 300 es
-in vec2 a_pos;
-out vec2 v_uv;
-void main() {
-    v_uv = a_pos * 0.5 + 0.5;
-    gl_Position = vec4(a_pos, 0.0, 1.0);
-}`;
 
 function compileShader(src, type) {
     const s = gl.createShader(type);
@@ -269,6 +206,111 @@ function safeWriteStorage(key, value) {
     } catch (_) {}
 }
 
+function isDesktopRuntime() {
+    if (typeof window === 'undefined') return false;
+    return window.__FORMA_DESKTOP__ === true || (!!window.ipc && typeof window.ipc.postMessage === 'function');
+}
+
+function clampDesktopMask(mask, fallback) {
+    if (!Number.isInteger(mask)) return fallback;
+    if (mask < 0 || mask > 511) return fallback;
+    return mask;
+}
+
+function clampDesktopGenerations(value, fallback = 3) {
+    if (!Number.isInteger(value)) return fallback;
+    return Math.max(2, Math.min(20, value));
+}
+
+function normalizeConwayPresetName(name) {
+    return typeof name === 'string' && Object.prototype.hasOwnProperty.call(CONWAY_PRESETS, name)
+        ? name
+        : 'life';
+}
+
+function normalizeGenerationsPresetName(name) {
+    return typeof name === 'string' && Object.prototype.hasOwnProperty.call(GEN_PRESETS, name)
+        ? name
+        : 'starwars';
+}
+
+function persistDesktopRuleState() {
+    if (!isDesktopRuntime() || !sim) return;
+    const payload = {
+        mode: currentMode === 1 ? 1 : 0,
+        birth_mask: Number(sim.get_birth_mask()) | 0,
+        survival_mask: Number(sim.get_survival_mask()) | 0,
+        generations: clampDesktopGenerations(generationsCount, 3),
+        preset_conway: normalizeConwayPresetName(selectedConwayPreset),
+        preset_gen: normalizeGenerationsPresetName(selectedGenerationsPreset),
+    };
+    safeWriteStorage(DESKTOP_RULE_STATE_KEY, JSON.stringify(payload));
+}
+
+function loadDesktopRuleState() {
+    if (!isDesktopRuntime()) return null;
+    const raw = safeReadStorage(DESKTOP_RULE_STATE_KEY);
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || (parsed.mode !== 0 && parsed.mode !== 1)) return null;
+        return {
+            mode: parsed.mode,
+            birth_mask: clampDesktopMask(parsed.birth_mask, CONWAY_PRESETS.life.b),
+            survival_mask: clampDesktopMask(parsed.survival_mask, CONWAY_PRESETS.life.s),
+            generations: clampDesktopGenerations(parsed.generations, 3),
+            preset_conway: normalizeConwayPresetName(parsed.preset_conway),
+            preset_gen: normalizeGenerationsPresetName(parsed.preset_gen),
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function applyDesktopRuleState(state) {
+    if (!state || !sim) return false;
+    const mode = state.mode === 1 ? 1 : 0;
+    const birthMask = clampDesktopMask(state.birth_mask, CONWAY_PRESETS.life.b);
+    const survivalMask = clampDesktopMask(state.survival_mask, CONWAY_PRESETS.life.s);
+    const nextGenerations = clampDesktopGenerations(state.generations, 3);
+    selectedConwayPreset = normalizeConwayPresetName(state.preset_conway);
+    selectedGenerationsPreset = normalizeGenerationsPresetName(state.preset_gen);
+
+    updateModeUI(mode);
+    sim.set_birth_rule(birthMask);
+    sim.set_survival_rule(survivalMask);
+
+    const conwayPreset = document.getElementById('conway-preset');
+    if (conwayPreset) conwayPreset.value = selectedConwayPreset;
+    const genPreset = document.getElementById('gen-preset');
+    if (genPreset) genPreset.value = selectedGenerationsPreset;
+
+    if (mode === 1) {
+        generationsCount = nextGenerations;
+        sim.set_generations(generationsCount);
+        const genStates = document.getElementById('gen-states');
+        const genStatesVal = document.getElementById('gen-states-val');
+        const paintStateInput = document.getElementById('paint-state');
+        if (genStates) genStates.value = String(generationsCount);
+        if (genStatesVal) genStatesVal.textContent = String(generationsCount);
+        if (paintStateInput) paintStateInput.max = String(generationsCount - 1);
+        if (paintState >= generationsCount) {
+            paintState = generationsCount - 1;
+            if (paintStateInput) paintStateInput.value = String(paintState);
+            const paintStateVal = document.getElementById('paint-state-val');
+            if (paintStateVal) paintStateVal.textContent = String(paintState);
+        }
+    } else {
+        generationsCount = 3;
+    }
+
+    buildCheckboxRow(document.getElementById('birth-row'), 'b', Number(sim.get_birth_mask()));
+    buildCheckboxRow(document.getElementById('survival-row'), 's', Number(sim.get_survival_mask()));
+    buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', Number(sim.get_birth_mask()));
+    buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', Number(sim.get_survival_mask()));
+    return true;
+}
+
 function clampToTier(size) {
     let closest = GRID_TIERS[0];
     let bestDist = Math.abs(size - closest);
@@ -336,6 +378,7 @@ function setResolutionModeAuto() {
     resolutionMode = 'auto';
     persistResolutionPrefs();
     applySimulationResolution(detectAutoTargetResolution(), true);
+    applyBatteryResolutionPolicy();
 }
 
 function toggleSimulationResolution() {
@@ -344,12 +387,14 @@ function toggleSimulationResolution() {
         const manual = simResolution <= 512 ? 1024 : 512;
         persistResolutionPrefs();
         applySimulationResolution(manual, true);
+        applyBatteryResolutionPolicy();
         return;
     }
     if (simResolution <= 512) {
         resolutionMode = 'manual';
         persistResolutionPrefs();
         applySimulationResolution(1024, true);
+        applyBatteryResolutionPolicy();
         return;
     }
     setResolutionModeAuto();
@@ -725,6 +770,161 @@ function setSpeed(value, syncSlider = true) {
     if (speedVal) speedVal.textContent = speed;
 }
 
+function effectiveTickRate() {
+    if (isDesktopRuntime() && wallpaperSessionActive && desktopOnBattery) {
+        return Math.min(speed, BATTERY_WALLPAPER_FPS_CAP);
+    }
+    return speed;
+}
+
+function refreshPerformanceOverrides() {
+    const theme = THEMES[currentTheme] || THEMES[0];
+    const forceNoBloom = wallpaperSessionActive || (isDesktopRuntime() && desktopOnBattery);
+    bloomEnabled = !forceNoBloom && theme.bloom && bloomSupported;
+}
+
+function applyBatteryResolutionPolicy() {
+    if (!isDesktopRuntime() || !sim) return;
+    const shouldEco = wallpaperSessionActive && desktopOnBattery;
+    if (shouldEco && !batteryEcoResolutionActive) {
+        batteryEcoBaseResolution = simResolution;
+        const idx = tierIndex(simResolution);
+        if (idx > 0) {
+            applySimulationResolution(GRID_TIERS[idx - 1], false);
+        }
+        batteryEcoResolutionActive = true;
+        return;
+    }
+    if (!shouldEco && batteryEcoResolutionActive) {
+        const restore = clampToTier(Number(batteryEcoBaseResolution || simResolution));
+        if (restore !== simResolution) {
+            applySimulationResolution(restore, false);
+        }
+        batteryEcoResolutionActive = false;
+        batteryEcoBaseResolution = null;
+    }
+}
+
+function ensureLoopRunning() {
+    if (!loopSuspended) return;
+    loopSuspended = false;
+    lastFrameTime = performance.now();
+    scheduleNextFrame(0);
+}
+
+function setWallpaperSessionActive(active) {
+    wallpaperSessionActive = !!active;
+    document.body.classList.toggle('wallpaper-session', wallpaperSessionActive);
+    const exitBtn = document.getElementById('btn-exit-view');
+    if (exitBtn) {
+        exitBtn.style.display = wallpaperSessionActive ? 'none' : '';
+    }
+    if (wallpaperSessionActive) {
+        setPresentationMode(true);
+    } else {
+        setPresentationMode(false);
+        hostCursorLast = null;
+        ensureLoopRunning();
+    }
+    refreshPerformanceOverrides();
+    applyBatteryResolutionPolicy();
+}
+
+function setDesktopViewportActive(active) {
+    const wasActive = desktopViewportActive;
+    desktopViewportActive = !!active;
+    if (!desktopViewportActive) {
+        hostCursorLast = null;
+        tickAccumulator = 0;
+    } else if (!wasActive && desktopViewportActive) {
+        ensureLoopRunning();
+    }
+}
+
+function setDesktopPowerState(onBattery) {
+    desktopOnBattery = !!onBattery;
+    refreshPerformanceOverrides();
+    applyBatteryResolutionPolicy();
+}
+
+function applyDesktopConfig(payload) {
+    if (!sim) {
+        desktopPendingConfig = payload;
+        return;
+    }
+    const cfg = payload || {};
+    if (Number.isFinite(cfg.resolution)) {
+        resolutionMode = 'manual';
+        applySimulationResolution(Number(cfg.resolution), false);
+        applyBatteryResolutionPolicy();
+    }
+    if (Number.isFinite(cfg.fps_cap)) {
+        setSpeed(Number(cfg.fps_cap), true);
+    }
+    if (Number.isFinite(cfg.theme)) {
+        applyTheme(Number(cfg.theme), false);
+    }
+}
+
+function screenFromHostToClient(payload) {
+    const px = Number(payload?.x);
+    const py = Number(payload?.y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+    const width = canvas?.clientWidth || window.innerWidth;
+    const height = canvas?.clientHeight || window.innerHeight;
+
+    const sw = Number(payload?.screen_w);
+    const sh = Number(payload?.screen_h);
+    if (Number.isFinite(sw) && Number.isFinite(sh) && sw > 0 && sh > 0) {
+        return {
+            x: Math.max(0, Math.min(width - 1, (px / sw) * width)),
+            y: Math.max(0, Math.min(height - 1, (py / sh) * height)),
+        };
+    }
+
+    const originX = Number.isFinite(window.screenX) ? window.screenX : (window.screenLeft || 0);
+    const originY = Number.isFinite(window.screenY) ? window.screenY : (window.screenTop || 0);
+    const localX = px - originX;
+    const localY = py - originY;
+    if (localX < -2 || localY < -2 || localX > width + 2 || localY > height + 2) {
+        return null;
+    }
+    return {
+        x: Math.max(0, Math.min(width - 1, localX)),
+        y: Math.max(0, Math.min(height - 1, localY)),
+    };
+}
+
+function paintFromHostCursor(payload) {
+    if (!wallpaperSessionActive || !desktopViewportActive || !sim || !playing) {
+        hostCursorLast = null;
+        return;
+    }
+    const point = screenFromHostToClient(payload);
+    if (!point) {
+        hostCursorLast = null;
+        return;
+    }
+    if (!hostCursorLast) {
+        paintAt(point.x, point.y, false);
+        hostCursorLast = point;
+        return;
+    }
+    const dx = point.x - hostCursorLast.x;
+    const dy = point.y - hostCursorLast.y;
+    const distance = Math.max(Math.abs(dx), Math.abs(dy));
+    const steps = Math.max(1, Math.ceil(distance / 3));
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        paintAt(hostCursorLast.x + dx * t, hostCursorLast.y + dy * t, false);
+    }
+    hostCursorLast = point;
+}
+
+function applyDesktopCursorMove(payload) {
+    paintFromHostCursor(payload || {});
+}
+
 function updateAmbientUI() {
     const btn = document.getElementById('btn-ambient');
     if (!btn) return;
@@ -756,6 +956,7 @@ function applyPreset(mode, name) {
 }
 
 function setPresentationMode(enabled) {
+    if (wallpaperSessionActive && !enabled) return;
     presentationMode = enabled;
     document.body.classList.toggle('presentation', enabled);
     if (enabled) {
@@ -796,8 +997,8 @@ function applyTheme(themeIndex, announce = true) {
     currentTheme = ((themeIndex % THEMES.length) + THEMES.length) % THEMES.length;
     const theme = THEMES[currentTheme];
     document.body.dataset.theme = theme.bodyTheme;
-    bloomEnabled = theme.bloom && bloomSupported;
     bloomStrength = theme.bloomStrength;
+    refreshPerformanceOverrides();
     sim.set_theme(currentTheme);
     document.getElementById('btn-theme').textContent = `THEME: ${theme.name.toUpperCase()}`;
     needsUpload = true;
@@ -949,29 +1150,40 @@ function setMode(mode) {
     closeMobileSheets();
     updateModeUI(mode);
     if (mode === 0) {
-        applyPreset(0, 'life');
-        applyPresetScene(0, 'life');
+        applyPreset(0, selectedConwayPreset);
+        applyPresetScene(0, selectedConwayPreset);
     } else if (mode === 1) {
-        applyPreset(1, 'starwars');
-        applyPresetScene(1, 'starwars');
+        applyPreset(1, selectedGenerationsPreset);
+        applyPresetScene(1, selectedGenerationsPreset);
     }
+    persistDesktopRuleState();
 }
 
 function applyConwayPreset(name) {
-    const p = CONWAY_PRESETS[name];
+    const presetName = normalizeConwayPresetName(name);
+    selectedConwayPreset = presetName;
+    const p = CONWAY_PRESETS[presetName];
     if (!p) return;
     sim.set_birth_rule(p.b);
     sim.set_survival_rule(p.s);
+    const conwayPreset = document.getElementById('conway-preset');
+    if (conwayPreset) conwayPreset.value = presetName;
     buildCheckboxRow(document.getElementById('birth-row'), 'b', p.b);
     buildCheckboxRow(document.getElementById('survival-row'), 's', p.s);
+    persistDesktopRuleState();
 }
 
 function applyGenPreset(name) {
-    const p = GEN_PRESETS[name];
+    const presetName = normalizeGenerationsPresetName(name);
+    selectedGenerationsPreset = presetName;
+    const p = GEN_PRESETS[presetName];
     if (!p) return;
     sim.set_birth_rule(p.b);
     sim.set_survival_rule(p.s);
+    generationsCount = p.states;
     sim.set_generations(p.states);
+    const genPreset = document.getElementById('gen-preset');
+    if (genPreset) genPreset.value = presetName;
     buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', p.b);
     buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', p.s);
     document.getElementById('gen-states').value = p.states;
@@ -982,6 +1194,7 @@ function applyGenPreset(name) {
         document.getElementById('paint-state').value = paintState;
         document.getElementById('paint-state-val').textContent = paintState;
     }
+    persistDesktopRuleState();
 }
 
 function applyPresetScene(mode, name) {
@@ -1046,9 +1259,11 @@ function wireUI() {
 
     document.getElementById('birth-row').addEventListener('change', () => {
         sim.set_birth_rule(readCheckboxMask(document.getElementById('birth-row')));
+        persistDesktopRuleState();
     });
     document.getElementById('survival-row').addEventListener('change', () => {
         sim.set_survival_rule(readCheckboxMask(document.getElementById('survival-row')));
+        persistDesktopRuleState();
     });
 
     // Generations presets
@@ -1060,22 +1275,26 @@ function wireUI() {
         applyPresetScene(1, genPreset.value);
     });
 
-    buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', 1 << 2);
-    buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', 0);
+    buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', sim.get_birth_mask());
+    buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', sim.get_survival_mask());
 
     document.getElementById('gen-birth-row').addEventListener('change', () => {
         sim.set_birth_rule(readCheckboxMask(document.getElementById('gen-birth-row')));
+        persistDesktopRuleState();
     });
     document.getElementById('gen-survival-row').addEventListener('change', () => {
         sim.set_survival_rule(readCheckboxMask(document.getElementById('gen-survival-row')));
+        persistDesktopRuleState();
     });
 
     const genStates = document.getElementById('gen-states');
     genStates.addEventListener('input', () => {
         const v = parseInt(genStates.value);
+        generationsCount = v;
         sim.set_generations(v);
         document.getElementById('gen-states-val').textContent = v;
         document.getElementById('paint-state').max = v - 1;
+        persistDesktopRuleState();
     });
 
 
@@ -1266,6 +1485,7 @@ function wireUI() {
             buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', s);
         }
         sim.randomize_with_seed(0.3, Math.floor(Math.random() * 0xFFFFFFFF));
+        persistDesktopRuleState();
         needsUpload = true;
         needsRender = true;
         statsDirty = true;
@@ -1499,6 +1719,18 @@ function gameLoop(timestamp) {
     if (fpsIndex % 10 === 0) {
         document.getElementById('stat-fps').textContent = Math.round(avgFps);
     }
+
+    const desktopHidden =
+        isDesktopRuntime() &&
+        wallpaperSessionActive &&
+        !desktopViewportActive;
+    if (desktopHidden) {
+        tickAccumulator = 0;
+        loopSuspended = true;
+        return;
+    }
+    loopSuspended = false;
+
     applyAdaptiveResolution(dt, avgFps);
 
     if (ambientMode && timestamp >= ambientNextMotionAt) {
@@ -1526,7 +1758,7 @@ function gameLoop(timestamp) {
     // Simulation ticks
     if (playing) {
         // How many ticks this frame based on desired speed
-        tickAccumulator += speed * (dt / 1000);
+        tickAccumulator += effectiveTickRate() * (dt / 1000);
         // Cap ticks per frame to avoid long catch-up bursts after tab stalls.
         const maxTicks = 5;
         const ticksThisFrame = Math.min(Math.floor(tickAccumulator), maxTicks);
@@ -1573,6 +1805,7 @@ function gameLoop(timestamp) {
 // ═══════════════════════════════════════════════════════════════════════
 
 async function main() {
+    desktopHost.setup();
     wasmExports = await init({ module_or_path: new URL('./pkg/forma_bg.wasm?v=theme2', import.meta.url) });
     wasmMemory = wasmExports;
 
@@ -1597,22 +1830,19 @@ async function main() {
     updateResolutionUI();
     updateZoomUI();
 
-    // Start in Conway mode
-    currentMode = 0;
-    sim.set_rule_mode(0);
-    applyConwayPreset('life');
+    const desktopRulesLoaded = applyDesktopRuleState(loadDesktopRuleState());
+    if (!desktopRulesLoaded) {
+        updateModeUI(0);
+        applyConwayPreset('life');
+    }
+    applyBatteryResolutionPolicy();
+    refreshPerformanceOverrides();
 
-    // Update UI to match
-    document.getElementById('conway-rules').style.display = 'block';
-    document.getElementById('generations-rules').style.display = 'none';
-    document.getElementById('paint-state-section').style.display = 'none';
-    document.querySelectorAll('#mode-toggle .mode-btn').forEach(btn => {
-        btn.classList.toggle('active', parseInt(btn.dataset.mode) === 0);
-    });
-
-    // First load should feel alive; only later rule switches stay blank.
-    applyPresetScene(0, 'life');
-    sim.randomize_with_seed(0.11, 42);
+    // Startup pattern: desktop starts clean; web keeps its default seeded field.
+    sim.clear();
+    if (!isDesktopRuntime()) {
+        sim.randomize_with_seed(0.11, 42);
+    }
     needsUpload = true;
     needsRender = true;
     statsDirty = true;
@@ -1627,6 +1857,10 @@ async function main() {
     setMobileUI(window.innerWidth <= 760);
     updatePlaybackUI();
     updateMobileEraseUI();
+    if (desktopPendingConfig) {
+        applyDesktopConfig(desktopPendingConfig);
+        desktopPendingConfig = null;
+    }
 
     // Start loop
     playing = true;

@@ -49,6 +49,37 @@ python3 -m http.server 8080
 
 Then open `http://localhost:8080` in a modern browser (Chrome/Edge recommended).
 
+## Windows Desktop (Phase 5)
+
+This repo now includes a Windows desktop host at `desktop/forma-wallpaper` using `wry`/WebView2.
+Phase 2 adds WorkerW embedding so Forma can attach behind desktop icons as wallpaper.
+Phase 3 adds a system tray menu for lifecycle controls (start, stop, exit).
+Phase 4 adds persisted settings (resolution, FPS cap, theme) loaded at startup.
+Phase 5 adds startup integration with first-run prompt and `Launch at Startup` tray toggle.
+If WorkerW attach fails, the app falls back to normal window mode.
+
+### Build web assets first
+```bash
+wasm-pack build --target web --out-dir www/pkg
+```
+
+### Run the desktop host
+```bash
+cargo run --manifest-path desktop/forma-wallpaper/Cargo.toml
+```
+
+### Build release executable
+```bash
+cargo build --release --manifest-path desktop/forma-wallpaper/Cargo.toml
+```
+
+Notes:
+- The host serves local assets from `www/` via a custom `forma://` protocol.
+- For packaged runs, keep a `www/` folder next to the executable.
+- Set `FORMA_FORCE_FALLBACK=1` to force normal-window fallback mode for testing.
+- Settings are saved to `%APPDATA%\Forma\config.json`.
+- In wallpaper session, Forma runs in presentation view while still reacting to cursor movement for painting.
+
 ## Deploy (GitHub Pages)
 
 This repo uses GitHub Actions to build wasm and deploy Pages automatically from `main`.
