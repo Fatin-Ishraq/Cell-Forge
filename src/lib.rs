@@ -1,11 +1,11 @@
 use wasm_bindgen::prelude::*;
 
-// ── Constants ──────────────────────────────────────────────────────────────
-const W: usize = 1024;
-const H: usize = 1024;
-const TOTAL: usize = W * H;
+const DEFAULT_W: usize = 1024;
+const DEFAULT_H: usize = 1024;
 const THEME_COUNT: usize = 4;
 const MAX_STATES: usize = 20;
+const MIN_GRID: usize = 64;
+const MAX_GRID: usize = 2048;
 const AGING_STOP_POINTS: [f32; 4] = [0.0, 0.33, 0.66, 1.0];
 const CONWAY_DEAD: [[u8; 4]; THEME_COUNT] = [
     [5, 5, 16, 255],
@@ -46,7 +46,11 @@ const GENERATIONS_STOPS: [[[u8; 4]; 4]; THEME_COUNT] = [
     ],
 ];
 
-// ── Color helpers ──────────────────────────────────────────────────────────
+#[inline(always)]
+fn idx(x: usize, y: usize, width: usize) -> usize {
+    y * width + x
+}
+
 fn lerp_color(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     [
@@ -92,44 +96,6 @@ fn build_generations_palette(theme: usize, max_states: u8) -> [[u8; 4]; MAX_STAT
     lut
 }
 
-// ── Simulation struct ──────────────────────────────────────────────────────
-#[wasm_bindgen]
-pub struct Simulation {
-    // Conway / Generations grid (u8)
-    cells_a: Vec<u8>,
-    cells_b: Vec<u8>,
-    use_a: bool,
-
-    // Pixel output buffer (RGBA)
-    pixels: Vec<u8>,
-
-    // Rule mode: 0=Conway, 1=Generations
-    rule_mode: u8,
-
-    // Conway/Generations rules
-    birth_mask: u32,    // bitmask: bit i = birth when i neighbors
-    survival_mask: u32, // bitmask: bit i = survive when i neighbors
-    num_states: u8,     // for Generations mode (2-20)
-    theme: u8,          // visual theme palette
-    generations_palette: [[u8; 4]; MAX_STATES + 1],
-
-    // Precomputed wrap tables to avoid branchy edge math in hot loops.
-    x_prev: Vec<usize>,
-    x_next: Vec<usize>,
-    y_prev: Vec<usize>,
-    y_next: Vec<usize>,
-
-    // Stats
-    population: u32,
-    generation: u64,
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-#[inline(always)]
-fn idx(x: usize, y: usize) -> usize {
-    y * W + x
-}
-
 fn build_wrap_tables(size: usize) -> (Vec<usize>, Vec<usize>) {
     let mut prev = Vec::with_capacity(size);
     let mut next = Vec::with_capacity(size);
@@ -141,31 +107,53 @@ fn build_wrap_tables(size: usize) -> (Vec<usize>, Vec<usize>) {
 }
 
 #[wasm_bindgen]
+pub struct Simulation {
+    cells_a: Vec<u8>,
+    cells_b: Vec<u8>,
+    use_a: bool,
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    total: usize,
+    rule_mode: u8,
+    birth_mask: u32,
+    survival_mask: u32,
+    num_states: u8,
+    theme: u8,
+    generations_palette: [[u8; 4]; MAX_STATES + 1],
+    x_prev: Vec<usize>,
+    x_next: Vec<usize>,
+    y_prev: Vec<usize>,
+    y_next: Vec<usize>,
+    population: u32,
+    generation: u64,
+}
+
+#[wasm_bindgen]
 impl Simulation {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Simulation {
-        let (x_prev, x_next) = build_wrap_tables(W);
-        let (y_prev, y_next) = build_wrap_tables(H);
+        let (x_prev, x_next) = build_wrap_tables(DEFAULT_W);
+        let (y_prev, y_next) = build_wrap_tables(DEFAULT_H);
+        let total = DEFAULT_W * DEFAULT_H;
         Simulation {
-            cells_a: vec![0u8; TOTAL],
-            cells_b: vec![0u8; TOTAL],
+            cells_a: vec![0u8; total],
+            cells_b: vec![0u8; total],
             use_a: true,
-
-            pixels: vec![0u8; TOTAL * 4],
-
+            pixels: vec![0u8; total * 4],
+            width: DEFAULT_W,
+            height: DEFAULT_H,
+            total,
             rule_mode: 0,
-
-            birth_mask: 1 << 3,       // B3
-            survival_mask: (1 << 2) | (1 << 3), // S23
+            birth_mask: 1 << 3,
+            survival_mask: (1 << 2) | (1 << 3),
             num_states: 2,
             theme: 0,
             generations_palette: build_generations_palette(0, 2),
-
             x_prev,
             x_next,
             y_prev,
             y_next,
-
             population: 0,
             generation: 0,
         }
@@ -177,7 +165,6 @@ impl Simulation {
         self.generations_palette = build_generations_palette(theme, self.num_states);
     }
 
-    // ── Core tick ──────────────────────────────────────────────────────────
     fn advance_steps(&mut self, steps: u32) {
         for _ in 0..steps {
             match self.rule_mode {
@@ -209,20 +196,22 @@ impl Simulation {
             (&self.cells_b, &mut self.cells_a)
         };
 
+        let w = self.width;
+        let h = self.height;
         let x_prev = &self.x_prev;
         let x_next = &self.x_next;
         let y_prev = &self.y_prev;
         let y_next = &self.y_next;
-
         let mut pop = 0u32;
-        for y in 0..H {
+
+        for y in 0..h {
             let ym1 = y_prev[y];
             let yp1 = y_next[y];
-            let row_m = ym1 * W;
-            let row = y * W;
-            let row_p = yp1 * W;
+            let row_m = ym1 * w;
+            let row = y * w;
+            let row_p = yp1 * w;
 
-            for x in 0..W {
+            for x in 0..w {
                 let xm1 = x_prev[x];
                 let xp1 = x_next[x];
                 let i = row + x;
@@ -259,6 +248,8 @@ impl Simulation {
             (&self.cells_b, &mut self.cells_a)
         };
 
+        let w = self.width;
+        let h = self.height;
         let ns = self.num_states;
         let x_prev = &self.x_prev;
         let x_next = &self.x_next;
@@ -266,21 +257,20 @@ impl Simulation {
         let y_next = &self.y_next;
         let mut pop = 0u32;
 
-        for y in 0..H {
+        for y in 0..h {
             let ym1 = y_prev[y];
             let yp1 = y_next[y];
-            let row_m = ym1 * W;
-            let row = y * W;
-            let row_p = yp1 * W;
+            let row_m = ym1 * w;
+            let row = y * w;
+            let row_p = yp1 * w;
 
-            for x in 0..W {
+            for x in 0..w {
                 let xm1 = x_prev[x];
                 let xp1 = x_next[x];
                 let i = row + x;
                 let state = cur[i];
 
                 if state <= 1 {
-                    // Dead and alive states both depend on state-1 neighbors.
                     let neighbors =
                         (cur[row_m + xm1] == 1) as u32 +
                         (cur[row_m + x] == 1) as u32 +
@@ -298,17 +288,13 @@ impl Simulation {
                         } else {
                             nxt[i] = 0;
                         }
+                    } else if ((self.survival_mask >> neighbors) & 1) == 1 {
+                        nxt[i] = 1;
+                        pop += 1;
                     } else {
-                        if ((self.survival_mask >> neighbors) & 1) == 1 {
-                            nxt[i] = 1;
-                            pop += 1;
-                        } else {
-                            // Start aging
-                            nxt[i] = if ns > 2 { 2 } else { 0 };
-                        }
+                        nxt[i] = if ns > 2 { 2 } else { 0 };
                     }
                 } else {
-                    // Aging: advance state, wrap to dead
                     let next_state = state + 1;
                     nxt[i] = if next_state >= ns { 0 } else { next_state };
                 }
@@ -318,9 +304,6 @@ impl Simulation {
         self.use_a = !self.use_a;
     }
 
-
-
-    // ── Pixel rendering ────────────────────────────────────────────────────
     fn render_pixels(&mut self) {
         let theme = (self.theme as usize).min(THEME_COUNT - 1);
         match self.rule_mode {
@@ -337,7 +320,7 @@ impl Simulation {
             1 => {
                 let cells = if self.use_a { &self.cells_a } else { &self.cells_b };
                 for (px, &state) in self.pixels.chunks_exact_mut(4).zip(cells.iter()) {
-                    let c = self.generations_palette[state as usize];
+                    let c = self.generations_palette[(state as usize).min(MAX_STATES)];
                     px[0] = c[0];
                     px[1] = c[1];
                     px[2] = c[2];
@@ -348,7 +331,6 @@ impl Simulation {
         }
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────
     pub fn get_pixels_ptr(&self) -> *const u8 {
         self.pixels.as_ptr()
     }
@@ -358,27 +340,50 @@ impl Simulation {
     }
 
     pub fn set_cell(&mut self, x: u32, y: u32, state: u8) {
-        let x = x as usize % W;
-        let y = y as usize % H;
+        let x = x as usize % self.width;
+        let y = y as usize % self.height;
         let cells = if self.use_a { &mut self.cells_a } else { &mut self.cells_b };
-        cells[idx(x, y)] = state;
+        cells[idx(x, y, self.width)] = state;
     }
 
     pub fn fill_region(&mut self, x: u32, y: u32, w: u32, h: u32, pattern: &[u8]) {
         let cells = if self.use_a { &mut self.cells_a } else { &mut self.cells_b };
         let pattern_len = pattern.len();
         for dy in 0..h {
-            let cy = ((y + dy) as usize) % H;
-            let row = cy * W;
+            let cy = ((y + dy) as usize) % self.height;
+            let row = cy * self.width;
             for dx in 0..w {
                 let pi = (dy * w + dx) as usize;
                 if pi >= pattern_len {
                     break;
                 }
-                let cx = ((x + dx) as usize) % W;
+                let cx = ((x + dx) as usize) % self.width;
                 cells[row + cx] = pattern[pi];
             }
         }
+    }
+
+    pub fn set_grid_size(&mut self, width: u32, height: u32) {
+        let width = (width as usize).clamp(MIN_GRID, MAX_GRID);
+        let height = (height as usize).clamp(MIN_GRID, MAX_GRID);
+        if self.width == width && self.height == height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.total = width * height;
+        self.cells_a = vec![0u8; self.total];
+        self.cells_b = vec![0u8; self.total];
+        self.pixels = vec![0u8; self.total * 4];
+        self.use_a = true;
+        let (x_prev, x_next) = build_wrap_tables(width);
+        let (y_prev, y_next) = build_wrap_tables(height);
+        self.x_prev = x_prev;
+        self.x_next = x_next;
+        self.y_prev = y_prev;
+        self.y_next = y_next;
+        self.population = 0;
+        self.generation = 0;
     }
 
     pub fn set_rule_mode(&mut self, mode: u8) {
@@ -415,9 +420,7 @@ impl Simulation {
     }
 
     pub fn randomize(&mut self, density: f32) {
-        // Simple LCG PRNG (no std rand in wasm easily)
-        let mut seed: u64 = 12345678 ^ (self.generation.wrapping_mul(6364136223846793005));
-        
+        let mut seed: u64 = 12345678 ^ self.generation.wrapping_mul(6364136223846793005);
         let cells = if self.use_a { &mut self.cells_a } else { &mut self.cells_b };
         for cell in cells.iter_mut() {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -428,7 +431,6 @@ impl Simulation {
 
     pub fn randomize_with_seed(&mut self, density: f32, seed_val: u32) {
         let mut seed: u64 = seed_val as u64;
-        
         let cells = if self.use_a { &mut self.cells_a } else { &mut self.cells_b };
         for cell in cells.iter_mut() {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -446,11 +448,11 @@ impl Simulation {
     }
 
     pub fn get_width(&self) -> u32 {
-        W as u32
+        self.width as u32
     }
 
     pub fn get_height(&self) -> u32 {
-        H as u32
+        self.height as u32
     }
 
     pub fn get_rule_mode(&self) -> u8 {

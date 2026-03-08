@@ -15,7 +15,8 @@ let canvas = null;
 // View state
 let viewX = 0, viewY = 0; // pan offset in grid coords
 let zoom = 1;
-const GRID_W = 1024, GRID_H = 1024;
+let gridW = 1024;
+let gridH = 1024;
 
 // Simulation state
 let playing = true;
@@ -53,7 +54,8 @@ let touchPrevDistance = 0;
 let touchPrevCenterX = 0;
 let touchPrevCenterY = 0;
 let loopTimerId = 0;
-let renderResolution = 1024;
+const RENDER_RESOLUTION = 1024;
+let simResolution = 1024;
 
 // FPS tracking
 const fpsSamples = new Array(60).fill(16.67);
@@ -64,7 +66,6 @@ let fpsSum = 16.67 * fpsSamples.length;
 let isLeftDown = false;
 let isRightDown = false;
 let isMiddleDown = false;
-let isSpaceDown = false;
 let lastMouseX = 0, lastMouseY = 0;
 
 // WebGL objects
@@ -201,8 +202,8 @@ function createProgram(vSrc, fSrc) {
 
 function applyRenderResolution() {
     if (!canvas || !gl) return;
-    canvas.width = renderResolution;
-    canvas.height = renderResolution;
+    canvas.width = RENDER_RESOLUTION;
+    canvas.height = RENDER_RESOLUTION;
     setupBloomFBOs();
     needsRender = true;
 }
@@ -210,13 +211,49 @@ function applyRenderResolution() {
 function updateResolutionUI() {
     const btn = document.getElementById('btn-resolution');
     if (!btn) return;
-    btn.textContent = `RES: ${renderResolution}`;
+    btn.textContent = `RES: ${simResolution}`;
 }
 
-function toggleRenderResolution() {
-    renderResolution = renderResolution === 1024 ? 512 : 1024;
+function resetPixelCache() {
+    wasmPixelsView = null;
+    wasmPixelsBuffer = null;
+    wasmPixelsPtr = -1;
+    wasmPixelsLen = -1;
+}
+
+function syncGridDimensions() {
+    gridW = Number(sim.get_width());
+    gridH = Number(sim.get_height());
+    simResolution = gridW;
+}
+
+function reallocateSimulationTexture() {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gridW, gridH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    resetPixelCache();
+}
+
+function toggleSimulationResolution() {
+    const nextSize = simResolution === 1024 ? 512 : 1024;
+    sim.set_grid_size(nextSize, nextSize);
+    syncGridDimensions();
+    reallocateSimulationTexture();
+    sim.randomize_with_seed(0.11, Math.floor(Math.random() * 0xFFFFFFFF));
     updateResolutionUI();
-    applyRenderResolution();
+    needsUpload = true;
+    needsRender = true;
+    statsDirty = true;
+}
+
+function shouldUseLowEndResolution() {
+    const cores = Number(navigator.hardwareConcurrency || 0);
+    const memory = Number(navigator.deviceMemory || 0);
+    const ua = navigator.userAgent || '';
+    const isMobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+    if (memory > 0 && memory <= 4) return true;
+    if (cores > 0 && cores <= 4) return true;
+    if (isMobileUA && (memory <= 6 || cores <= 6)) return true;
+    return false;
 }
 
 function initWebGL() {
@@ -258,7 +295,7 @@ function initWebGL() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, GRID_W, GRID_H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gridW, gridH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
     // Bloom FBOs (2 ping-pong at half resolution)
     applyRenderResolution();
@@ -341,7 +378,7 @@ function uploadPixels() {
         wasmPixelsLen = len;
     }
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GRID_W, GRID_H, gl.RGBA, gl.UNSIGNED_BYTE, wasmPixelsView);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gridW, gridH, gl.RGBA, gl.UNSIGNED_BYTE, wasmPixelsView);
 }
 
 function render() {
@@ -426,12 +463,12 @@ function screenToGrid(sx, sy) {
     const uvY = ndcY / zoom + viewY;
 
     // UV to grid coords
-    let gx = (uvX * 0.5 + 0.5) * GRID_W;
-    let gy = (uvY * 0.5 + 0.5) * GRID_H;
+    let gx = (uvX * 0.5 + 0.5) * gridW;
+    let gy = (uvY * 0.5 + 0.5) * gridH;
 
     // Toroidal wrap
-    gx = ((gx % GRID_W) + GRID_W) % GRID_W;
-    gy = ((gy % GRID_H) + GRID_H) % GRID_H;
+    gx = ((gx % gridW) + gridW) % gridW;
+    gy = ((gy % gridH) + gridH) % gridH;
 
     return { x: Math.floor(gx), y: Math.floor(gy) };
 }
@@ -701,8 +738,8 @@ function paintAt(sx, sy, erase) {
             squareBrushFillState = state;
         }
         sim.fill_region(
-            (x - half + GRID_W) % GRID_W,
-            (y - half + GRID_H) % GRID_H,
+            (x - half + gridW) % gridW,
+            (y - half + gridH) % gridH,
             brushSize, brushSize, squareBrushBuffer
         );
         needsUpload = true;
@@ -712,8 +749,8 @@ function paintAt(sx, sy, erase) {
             for (let dx = -half; dx <= half; dx++) {
                 if (dx * dx + dy * dy <= half * half) {
                     sim.set_cell(
-                        (x + dx + GRID_W) % GRID_W,
-                        (y + dy + GRID_H) % GRID_H,
+                        (x + dx + gridW) % gridW,
+                        (y + dy + gridH) % gridH,
                         state
                     );
                 }
@@ -727,8 +764,8 @@ function paintAt(sx, sy, erase) {
             const dx = Math.floor(Math.random() * brushSize) - half;
             const dy = Math.floor(Math.random() * brushSize) - half;
             sim.set_cell(
-                (x + dx + GRID_W) % GRID_W,
-                (y + dy + GRID_H) % GRID_H,
+                (x + dx + gridW) % gridW,
+                (y + dy + gridH) % gridH,
                 state
             );
         }
@@ -900,7 +937,6 @@ function wireUI() {
     // Playback
     const btnPlay = document.getElementById('btn-play');
     const btnAmbient = document.getElementById('btn-ambient');
-    const btnResolution = document.getElementById('btn-resolution');
     const btnPresent = document.getElementById('btn-present');
     const btnTheme = document.getElementById('btn-theme');
     const btnExitView = document.getElementById('btn-exit-view');
@@ -971,12 +1007,6 @@ function wireUI() {
     btnAmbient.addEventListener('click', () => {
         closeMobileSheets();
         setAmbientMode(!ambientMode);
-    });
-
-    btnResolution.addEventListener('click', () => {
-        disableAmbientMode();
-        closeMobileSheets();
-        toggleRenderResolution();
     });
 
     btnPresent.addEventListener('click', () => {
@@ -1106,7 +1136,7 @@ function setupInput() {
 
     canvas.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        if (e.button === 0 && !isSpaceDown) {
+        if (e.button === 0) {
             disableAmbientMode();
             isLeftDown = true;
             paintAt(e.clientX, e.clientY, false);
@@ -1114,7 +1144,7 @@ function setupInput() {
             disableAmbientMode();
             isRightDown = true;
             paintAt(e.clientX, e.clientY, true);
-        } else if (e.button === 1 || (e.button === 0 && isSpaceDown)) {
+        } else if (e.button === 1) {
             disableAmbientMode();
             isMiddleDown = true;
         }
@@ -1125,7 +1155,7 @@ function setupInput() {
     canvas.addEventListener('mousemove', (e) => {
         const now = performance.now();
 
-        if (isMiddleDown || (isLeftDown && isSpaceDown)) {
+        if (isMiddleDown) {
             // Pan
             const displayWidth = canvas.clientWidth || window.innerWidth;
             const displayHeight = canvas.clientHeight || window.innerHeight;
@@ -1243,10 +1273,12 @@ function setupInput() {
             if (!presentationMode) {
                 setAboutOpen(true);
             }
-        } else if (e.code === 'Space') {
-            isSpaceDown = true;
+        } else if (e.code === 'Space' && !e.repeat) {
             e.preventDefault();
             disableAmbientMode();
+            playing = !playing;
+            updatePlaybackUI();
+            needsRender = true;
         } else if (e.key === 'a' || e.key === 'A') {
             if (!aboutOpen) {
                 e.preventDefault();
@@ -1256,6 +1288,12 @@ function setupInput() {
             if (!aboutOpen) {
                 disableAmbientMode();
                 cycleTheme();
+            }
+        } else if (e.key === 'r' || e.key === 'R') {
+            if (!aboutOpen) {
+                e.preventDefault();
+                disableAmbientMode();
+                toggleSimulationResolution();
             }
         } else if ((e.key === '+' || e.key === '=') && !aboutOpen) {
             e.preventDefault();
@@ -1277,12 +1315,6 @@ function setupInput() {
                 }
                 setPresentationMode(!presentationMode);
             }
-        }
-    });
-
-    window.addEventListener('keyup', (e) => {
-        if (e.code === 'Space') {
-            isSpaceDown = false;
         }
     });
 
@@ -1374,7 +1406,7 @@ function gameLoop(timestamp) {
         statsDirty = false;
     }
 
-    const activeInput = isLeftDown || isRightDown || isMiddleDown || isSpaceDown || touchMode !== 'none';
+    const activeInput = isLeftDown || isRightDown || isMiddleDown || touchMode !== 'none';
     const canIdle =
         !playing &&
         !ambientMode &&
@@ -1394,6 +1426,11 @@ async function main() {
     wasmMemory = wasmExports;
 
     sim = new Simulation();
+    syncGridDimensions();
+    if (shouldUseLowEndResolution()) {
+        sim.set_grid_size(512, 512);
+        syncGridDimensions();
+    }
 
     if (!initWebGL()) return;
     applyTheme(0, false);
