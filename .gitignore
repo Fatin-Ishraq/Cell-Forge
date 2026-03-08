@@ -1,7 +1,6 @@
 /target
 /pkg
 /www/pkg
-/Cargo.lock
 /node_modules
 /dist
 /.vs
@@ -9,3 +8,4 @@
 /.vscode
 .DS_Store
 /benchmark
+/docs

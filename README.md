@@ -45,6 +45,14 @@ python3 -m http.server 8080
 
 Then open `http://localhost:8080` in a modern browser (Chrome/Edge recommended).
 
+## Deploy (GitHub Pages)
+
+This repo uses GitHub Actions to build wasm and deploy Pages automatically from `main`.
+
+1. Push to `main`.
+2. In GitHub, set Pages source to `GitHub Actions`.
+3. Workflow `.github/workflows/deploy-pages.yml` builds `www/pkg` and deploys `www/` as the site artifact.
+
 ## Project Structure
 ```
 cellforge/
