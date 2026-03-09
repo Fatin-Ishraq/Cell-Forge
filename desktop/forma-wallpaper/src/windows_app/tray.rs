@@ -1,9 +1,10 @@
-use super::{AppConfig, TrayMenuIds, TrayUiState};
+use super::{icon, AppConfig, TrayMenuIds, TrayUiState};
 use anyhow::{Context, Result};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::TrayIconBuilder;
 
-pub(super) fn sync_tray_checks(ui: &TrayUiState, config: &AppConfig) {
+pub(super) fn sync_tray_checks(ui: &TrayUiState, config: &AppConfig, wallpaper_enabled: bool) {
+    ui.wallpaper_enabled.set_checked(wallpaper_enabled);
     ui.startup_enabled.set_checked(config.startup_enabled);
     ui.res_512.set_checked(config.resolution == 512);
     ui.res_768.set_checked(config.resolution == 768);
@@ -19,11 +20,16 @@ pub(super) fn sync_tray_checks(ui: &TrayUiState, config: &AppConfig) {
 
 pub(super) fn create_tray_icon(
     config: &AppConfig,
+    wallpaper_enabled: bool,
 ) -> Result<(tray_icon::TrayIcon, TrayMenuIds, TrayUiState)> {
     let menu = Menu::new();
-    let start_item = MenuItem::new("Start Wallpaper", true, None);
-    let stop_item = MenuItem::new("Stop Wallpaper", true, None);
+    let controls_item = MenuItem::new("Open Controls Window", true, None);
+    let wallpaper_item = CheckMenuItem::new("Wallpaper Enabled", true, wallpaper_enabled, None);
     let startup_item = CheckMenuItem::new("Launch at Startup", true, config.startup_enabled, None);
+    let check_updates_item = MenuItem::new("Check for Updates", true, None);
+    let export_diag_item = MenuItem::new("Export Diagnostics", true, None);
+    let open_logs_item = MenuItem::new("Open Logs Folder", true, None);
+    let about_item = MenuItem::new("About Forma Wallpaper", true, None);
 
     let res_512 = CheckMenuItem::new("512", true, config.resolution == 512, None);
     let res_768 = CheckMenuItem::new("768", true, config.resolution == 768, None);
@@ -43,16 +49,20 @@ pub(super) fn create_tray_icon(
     let exit_item = MenuItem::new("Exit", true, None);
     let separator = PredefinedMenuItem::separator();
 
-    menu.append(&start_item)?;
-    menu.append(&stop_item)?;
+    menu.append(&controls_item)?;
+    menu.append(&wallpaper_item)?;
     menu.append(&startup_item)?;
+    menu.append(&check_updates_item)?;
+    menu.append(&export_diag_item)?;
     menu.append(&resolution_menu)?;
     menu.append(&fps_menu)?;
     menu.append(&theme_menu)?;
+    menu.append(&open_logs_item)?;
+    menu.append(&about_item)?;
     menu.append(&separator)?;
     menu.append(&exit_item)?;
 
-    let icon = make_tray_icon().context("failed to build tray icon image")?;
+    let icon = icon::load_tray_icon().context("failed to load tray icon image")?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Forma Wallpaper")
@@ -61,9 +71,11 @@ pub(super) fn create_tray_icon(
         .context("failed to initialize tray icon")?;
 
     let ids = TrayMenuIds {
-        start: start_item.id().clone(),
-        stop: stop_item.id().clone(),
+        open_controls: controls_item.id().clone(),
+        wallpaper_enabled: wallpaper_item.id().clone(),
         startup_enabled: startup_item.id().clone(),
+        check_updates: check_updates_item.id().clone(),
+        export_diagnostics: export_diag_item.id().clone(),
         res_512: res_512.id().clone(),
         res_768: res_768.id().clone(),
         res_1024: res_1024.id().clone(),
@@ -74,9 +86,12 @@ pub(super) fn create_tray_icon(
         theme_1: theme_1.id().clone(),
         theme_2: theme_2.id().clone(),
         theme_3: theme_3.id().clone(),
+        open_logs: open_logs_item.id().clone(),
+        about: about_item.id().clone(),
         exit: exit_item.id().clone(),
     };
     let ui = TrayUiState {
+        wallpaper_enabled: wallpaper_item,
         startup_enabled: startup_item,
         res_512,
         res_768,
@@ -90,23 +105,4 @@ pub(super) fn create_tray_icon(
         theme_3,
     };
     Ok((tray, ids, ui))
-}
-
-fn make_tray_icon() -> Result<Icon> {
-    let size = 32u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
-
-    for y in 0..size {
-        for x in 0..size {
-            let i = ((y * size + x) * 4) as usize;
-            let checker = ((x / 4) + (y / 4)) % 2 == 0;
-            let (r, g, b) = if checker { (38, 214, 140) } else { (18, 98, 80) };
-            rgba[i] = r;
-            rgba[i + 1] = g;
-            rgba[i + 2] = b;
-            rgba[i + 3] = 255;
-        }
-    }
-
-    Icon::from_rgba(rgba, size, size).map_err(Into::into)
 }

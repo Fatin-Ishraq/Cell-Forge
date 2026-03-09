@@ -56,5 +56,13 @@ export function createDesktopHostBridge(handlers) {
         }
     }
 
-    return { setup };
+    function setWallpaperActive(active) {
+        post('SetWallpaperActive', { active: !!active });
+    }
+
+    function setDesktopConfig(patch) {
+        post('SetDesktopConfig', patch || {});
+    }
+
+    return { setup, setWallpaperActive, setDesktopConfig };
 }

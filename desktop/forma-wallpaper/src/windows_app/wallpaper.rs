@@ -31,14 +31,17 @@ pub(super) fn start_wallpaper_mode(window: &tao::window::Window) -> WallpaperSta
     state
 }
 
-pub(super) fn stop_wallpaper_mode(window: &tao::window::Window) -> WallpaperState {
+pub(super) fn stop_wallpaper_mode(
+    window: &tao::window::Window,
+    show_controls_window: bool,
+) -> WallpaperState {
     let hwnd = window.hwnd() as HWND;
     detach_from_workerw(hwnd);
     window.set_decorations(true);
     if let Err(err) = window.set_skip_taskbar(false) {
         println!("Failed to restore taskbar entry: {err}");
     }
-    window.set_visible(true);
+    window.set_visible(show_controls_window);
     println!("Wallpaper stopped; running as normal window.");
     WallpaperState {
         attached: false,
@@ -105,6 +108,38 @@ pub(super) fn query_on_battery_power() -> Option<bool> {
 
 pub(super) fn is_window_valid(hwnd: HWND) -> bool {
     unsafe { !hwnd.is_null() && IsWindow(hwnd) != 0 }
+}
+
+pub(super) fn refresh_wallpaper_bounds(window: &tao::window::Window, workerw: HWND) {
+    if workerw.is_null() {
+        return;
+    }
+    let hwnd = window.hwnd() as HWND;
+    unsafe {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let got_rect = GetClientRect(workerw, &mut rect);
+        let (base_width, base_height) = if got_rect != 0 {
+            (rect.right - rect.left, rect.bottom - rect.top)
+        } else {
+            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        };
+        let width = (base_width + 2).max(1);
+        let height = (base_height + 2).max(1);
+        let _ = SetWindowPos(
+            hwnd,
+            null_mut(),
+            -1,
+            -1,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        );
+    }
 }
 
 fn class_name_for_window(hwnd: HWND) -> Option<String> {

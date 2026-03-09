@@ -6,7 +6,9 @@ use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
+};
 
 fn startup_reg_subkey() -> Vec<u16> {
     wide_null("Software\\Microsoft\\Windows\\CurrentVersion\\Run")
@@ -97,4 +99,39 @@ pub(super) fn prompt_startup_enable() -> bool {
         )
     };
     result == IDYES
+}
+
+pub(super) fn prompt_start_wallpaper_now() -> bool {
+    let title = wide_null("Forma Wallpaper");
+    let msg = wide_null(
+        "Welcome to Forma Wallpaper.\n\nStart wallpaper mode now?\n\nTip: you can always switch modes from the tray icon.",
+    );
+    let result = unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            msg.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    result == IDYES
+}
+
+pub(super) fn show_about_dialog(log_path: Option<&std::path::PathBuf>) {
+    let title = wide_null("Forma Wallpaper");
+    let mut body = String::from(
+        "Forma Wallpaper\nVersion: 0.1.0\n\nQuick actions:\n- Wallpaper Enabled toggle controls desktop mode\n- Open Controls Window brings back the full UI\n- Launch at Startup keeps it running after sign-in\n- Check for Updates opens the latest release page\n- Export Diagnostics writes a support report to LocalAppData\n\nConfig: %APPDATA%\\Forma\\config.json",
+    );
+    if let Some(path) = log_path {
+        body.push_str(&format!("\nLog file: {}", path.display()));
+    }
+    let msg = wide_null(&body);
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            msg.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
 }

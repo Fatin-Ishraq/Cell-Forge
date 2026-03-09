@@ -41,6 +41,9 @@ let needsRender = true;
 let statsDirty = true;
 let desktopPendingConfig = null;
 let wallpaperSessionActive = false;
+let wallpaperTogglePendingTarget = null;
+let wallpaperTogglePendingTimer = 0;
+let suppressHostConfigEmit = false;
 let desktopViewportActive = true;
 let desktopOnBattery = false;
 let loopSuspended = false;
@@ -211,6 +214,11 @@ function isDesktopRuntime() {
     return window.__FORMA_DESKTOP__ === true || (!!window.ipc && typeof window.ipc.postMessage === 'function');
 }
 
+function pushDesktopConfigPatch(patch) {
+    if (!isDesktopRuntime() || suppressHostConfigEmit) return;
+    desktopHost.setDesktopConfig(patch || {});
+}
+
 function clampDesktopMask(mask, fallback) {
     if (!Number.isInteger(mask)) return fallback;
     if (mask < 0 || mask > 511) return fallback;
@@ -352,7 +360,7 @@ function detectAutoTargetResolution() {
     return autoTargetResolution;
 }
 
-function applySimulationResolution(nextSize, reseed = true) {
+function applySimulationResolution(nextSize, reseed = true, emitHost = true) {
     const size = clampToTier(nextSize);
     sim.set_grid_size(size, size);
     syncGridDimensions();
@@ -367,6 +375,9 @@ function applySimulationResolution(nextSize, reseed = true) {
     needsUpload = true;
     needsRender = true;
     statsDirty = true;
+    if (emitHost) {
+        pushDesktopConfigPatch({ resolution: simResolution });
+    }
 }
 
 function persistResolutionPrefs() {
@@ -669,6 +680,24 @@ function updatePlaybackUI() {
     if (mobileBtn) mobileBtn.textContent = icon;
 }
 
+function updateWallpaperToggleUI() {
+    const btn = document.getElementById('btn-wallpaper-toggle');
+    if (!btn) return;
+    if (!isDesktopRuntime()) {
+        btn.style.display = 'none';
+        return;
+    }
+    btn.style.display = '';
+    const effective = wallpaperTogglePendingTarget === null
+        ? wallpaperSessionActive
+        : wallpaperTogglePendingTarget;
+    btn.textContent = wallpaperTogglePendingTarget === null
+        ? (effective ? 'WALLPAPER: ON' : 'WALLPAPER: OFF')
+        : (effective ? 'SWITCHING: ON...' : 'SWITCHING: OFF...');
+    btn.classList.toggle('accent', effective);
+    btn.disabled = wallpaperTogglePendingTarget !== null;
+}
+
 function updateMobileEraseUI() {
     const paintBtn = document.getElementById('btn-touch-paint');
     const eraseBtn = document.getElementById('btn-touch-erase');
@@ -760,14 +789,19 @@ function sliderFromSpeed(speedValue) {
     return Math.max(0, Math.min(SPEED_SLIDER_MAX, Math.round(t * SPEED_SLIDER_MAX)));
 }
 
-function setSpeed(value, syncSlider = true) {
-    speed = clampSpeed(value);
+function setSpeed(value, syncSlider = true, emitHost = true) {
+    const nextSpeed = clampSpeed(value);
+    const changed = nextSpeed !== speed;
+    speed = nextSpeed;
     if (syncSlider) {
         const speedSlider = document.getElementById('speed');
         if (speedSlider) speedSlider.value = sliderFromSpeed(speed);
     }
     const speedVal = document.getElementById('speed-val');
     if (speedVal) speedVal.textContent = speed;
+    if (emitHost && changed) {
+        pushDesktopConfigPatch({ fps_cap: speed });
+    }
 }
 
 function effectiveTickRate() {
@@ -814,7 +848,13 @@ function ensureLoopRunning() {
 
 function setWallpaperSessionActive(active) {
     wallpaperSessionActive = !!active;
+    wallpaperTogglePendingTarget = null;
+    if (wallpaperTogglePendingTimer) {
+        clearTimeout(wallpaperTogglePendingTimer);
+        wallpaperTogglePendingTimer = 0;
+    }
     document.body.classList.toggle('wallpaper-session', wallpaperSessionActive);
+    updateWallpaperToggleUI();
     const exitBtn = document.getElementById('btn-exit-view');
     if (exitBtn) {
         exitBtn.style.display = wallpaperSessionActive ? 'none' : '';
@@ -853,17 +893,19 @@ function applyDesktopConfig(payload) {
         return;
     }
     const cfg = payload || {};
+    suppressHostConfigEmit = true;
     if (Number.isFinite(cfg.resolution)) {
         resolutionMode = 'manual';
-        applySimulationResolution(Number(cfg.resolution), false);
+        applySimulationResolution(Number(cfg.resolution), false, false);
         applyBatteryResolutionPolicy();
     }
     if (Number.isFinite(cfg.fps_cap)) {
-        setSpeed(Number(cfg.fps_cap), true);
+        setSpeed(Number(cfg.fps_cap), true, false);
     }
     if (Number.isFinite(cfg.theme)) {
-        applyTheme(Number(cfg.theme), false);
+        applyTheme(Number(cfg.theme), false, false);
     }
+    suppressHostConfigEmit = false;
 }
 
 function screenFromHostToClient(payload) {
@@ -993,8 +1035,10 @@ function flashThemeBadge(name) {
     }, 1400);
 }
 
-function applyTheme(themeIndex, announce = true) {
-    currentTheme = ((themeIndex % THEMES.length) + THEMES.length) % THEMES.length;
+function applyTheme(themeIndex, announce = true, emitHost = true) {
+    const nextTheme = ((themeIndex % THEMES.length) + THEMES.length) % THEMES.length;
+    const changed = nextTheme !== currentTheme;
+    currentTheme = nextTheme;
     const theme = THEMES[currentTheme];
     document.body.dataset.theme = theme.bodyTheme;
     bloomStrength = theme.bloomStrength;
@@ -1003,6 +1047,9 @@ function applyTheme(themeIndex, announce = true) {
     document.getElementById('btn-theme').textContent = `THEME: ${theme.name.toUpperCase()}`;
     needsUpload = true;
     needsRender = true;
+    if (emitHost && changed) {
+        pushDesktopConfigPatch({ theme: currentTheme });
+    }
     if (announce) {
         flashThemeBadge(theme.name);
     }
@@ -1017,11 +1064,11 @@ function applyAmbientScene() {
     updateModeUI(scene.mode);
     applyPreset(scene.mode, scene.preset);
     applyPresetScene(scene.mode, scene.preset);
-    applyTheme(scene.theme, false);
+    applyTheme(scene.theme, false, false);
     resetView();
     setZoom(scene.zoom, false);
     sim.randomize_with_seed(scene.density, scene.seed + Math.floor(performance.now()));
-    setSpeed(scene.speed, true);
+    setSpeed(scene.speed, true, false);
     needsUpload = true;
     needsRender = true;
     statsDirty = true;
@@ -1202,7 +1249,7 @@ function applyPresetScene(mode, name) {
     if (!preset) return;
     sim.clear();
     // Keep user-selected speed when changing rules/presets.
-    setSpeed(speed, true);
+    setSpeed(speed, true, false);
     needsUpload = true;
     needsRender = true;
     statsDirty = true;
@@ -1301,6 +1348,7 @@ function wireUI() {
     // Playback
     const btnPlay = document.getElementById('btn-play');
     const btnAmbient = document.getElementById('btn-ambient');
+    const btnWallpaperToggle = document.getElementById('btn-wallpaper-toggle');
     const btnPresent = document.getElementById('btn-present');
     const btnTheme = document.getElementById('btn-theme');
     const btnExitView = document.getElementById('btn-exit-view');
@@ -1322,6 +1370,22 @@ function wireUI() {
     btnAbout.addEventListener('click', () => {
         setAboutOpen(true);
     });
+
+    if (btnWallpaperToggle) {
+        btnWallpaperToggle.addEventListener('click', () => {
+            if (!isDesktopRuntime()) return;
+            if (wallpaperTogglePendingTarget !== null) return;
+            const next = !wallpaperSessionActive;
+            wallpaperTogglePendingTarget = next;
+            updateWallpaperToggleUI();
+            desktopHost.setWallpaperActive(next);
+            wallpaperTogglePendingTimer = window.setTimeout(() => {
+                wallpaperTogglePendingTarget = null;
+                wallpaperTogglePendingTimer = 0;
+                updateWallpaperToggleUI();
+            }, 1500);
+        });
+    }
 
     btnAboutClose.addEventListener('click', () => {
         setAboutOpen(false);
@@ -1826,14 +1890,19 @@ async function main() {
     }
 
     if (!initWebGL()) return;
-    applyTheme(0, false);
+    applyTheme(isDesktopRuntime() ? 3 : 0, false, false);
     updateResolutionUI();
     updateZoomUI();
 
     const desktopRulesLoaded = applyDesktopRuleState(loadDesktopRuleState());
     if (!desktopRulesLoaded) {
-        updateModeUI(0);
-        applyConwayPreset('life');
+        if (isDesktopRuntime()) {
+            updateModeUI(1);
+            applyGenPreset('brians');
+        } else {
+            updateModeUI(0);
+            applyConwayPreset('life');
+        }
     }
     applyBatteryResolutionPolicy();
     refreshPerformanceOverrides();
@@ -1856,6 +1925,7 @@ async function main() {
     setupInput();
     setMobileUI(window.innerWidth <= 760);
     updatePlaybackUI();
+    updateWallpaperToggleUI();
     updateMobileEraseUI();
     if (desktopPendingConfig) {
         applyDesktopConfig(desktopPendingConfig);

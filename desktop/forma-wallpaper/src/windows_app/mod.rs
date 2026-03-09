@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
@@ -10,6 +11,9 @@ use wry::WebViewBuilder;
 
 mod assets;
 mod config;
+mod icon;
+mod logs;
+mod release_ops;
 mod startup;
 mod tray;
 mod util;
@@ -20,6 +24,26 @@ mod webview_bridge;
 struct IpcMessage {
     #[serde(rename = "type")]
     message_type: String,
+    #[serde(default)]
+    payload: Option<IpcPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpcPayload {
+    active: Option<bool>,
+    resolution: Option<u16>,
+    fps_cap: Option<u16>,
+    theme: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HostCommand {
+    SetWallpaperActive(bool),
+    SetDesktopConfig {
+        resolution: Option<u16>,
+        fps_cap: Option<u16>,
+        theme: Option<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,12 +59,14 @@ struct WallpaperHost {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct AppConfig {
     resolution: u16,
     fps_cap: u16,
     theme: u8,
     startup_enabled: bool,
     startup_prompt_seen: bool,
+    onboarding_prompt_seen: bool,
 }
 
 impl Default for AppConfig {
@@ -51,6 +77,7 @@ impl Default for AppConfig {
             theme: 0,
             startup_enabled: false,
             startup_prompt_seen: false,
+            onboarding_prompt_seen: false,
         }
     }
 }
@@ -73,10 +100,60 @@ impl AppConfig {
     }
 }
 
+fn recommended_first_run_resolution_fps() -> (u16, u16) {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let on_battery = wallpaper::query_on_battery_power().unwrap_or(false);
+
+    let (mut resolution, mut fps_cap) = if cores <= 4 {
+        (512u16, 30u16)
+    } else if cores <= 8 {
+        (768u16, 60u16)
+    } else {
+        (1024u16, 120u16)
+    };
+
+    if on_battery {
+        fps_cap = 30;
+        if resolution > 512 {
+            resolution = 768;
+        }
+    }
+
+    (resolution, fps_cap)
+}
+
+fn normalize_tray_resolution(value: u16) -> u16 {
+    if value < 640 {
+        512
+    } else if value < 896 {
+        768
+    } else {
+        1024
+    }
+}
+
+fn normalize_tray_fps(value: u16) -> u16 {
+    let candidates = [30u16, 60u16, 120u16];
+    let mut best = candidates[0];
+    let mut best_dist = value.abs_diff(best);
+    for candidate in candidates.iter().skip(1) {
+        let dist = value.abs_diff(*candidate);
+        if dist < best_dist {
+            best = *candidate;
+            best_dist = dist;
+        }
+    }
+    best
+}
+
 struct TrayMenuIds {
-    start: MenuId,
-    stop: MenuId,
+    open_controls: MenuId,
+    wallpaper_enabled: MenuId,
     startup_enabled: MenuId,
+    check_updates: MenuId,
+    export_diagnostics: MenuId,
     res_512: MenuId,
     res_768: MenuId,
     res_1024: MenuId,
@@ -87,10 +164,13 @@ struct TrayMenuIds {
     theme_1: MenuId,
     theme_2: MenuId,
     theme_3: MenuId,
+    open_logs: MenuId,
+    about: MenuId,
     exit: MenuId,
 }
 
 struct TrayUiState {
+    wallpaper_enabled: CheckMenuItem,
     startup_enabled: CheckMenuItem,
     res_512: CheckMenuItem,
     res_768: CheckMenuItem,
@@ -105,17 +185,40 @@ struct TrayUiState {
 }
 
 pub fn run() -> Result<()> {
+    if let Err(err) = logs::init() {
+        println!("Logging setup failed: {err}");
+    }
+
     let event_loop = EventLoop::new();
+    let window_icon = match icon::load_window_icon() {
+        Ok(icon) => Some(icon),
+        Err(err) => {
+            logs::warn(format!("Failed to load window icon, using default: {err}"));
+            None
+        }
+    };
     let window = WindowBuilder::new()
-        .with_title("Forma Wallpaper (Phase 4)")
+        .with_title("Forma Wallpaper")
+        .with_window_icon(window_icon)
         .build(&event_loop)
         .context("failed to create desktop window")?;
 
     let mut config = config::load_config().unwrap_or_else(|err| {
-        println!("Config load failed, using defaults: {err}");
+        logs::warn(format!("Config load failed, using defaults: {err}"));
         AppConfig::default()
     });
     config = config.normalize();
+    let first_run = !config.startup_prompt_seen && !config.onboarding_prompt_seen;
+    if first_run {
+        let (resolution, fps_cap) = recommended_first_run_resolution_fps();
+        config.resolution = resolution;
+        config.fps_cap = fps_cap;
+        config.theme = 3; // Mono
+        logs::info(format!(
+            "First-run defaults: preset=Brian's Brain theme=Mono resolution={} fps={}",
+            config.resolution, config.fps_cap
+        ));
+    }
     config.startup_enabled = startup::is_startup_enabled().unwrap_or(config.startup_enabled);
 
     if !config.startup_prompt_seen {
@@ -123,13 +226,22 @@ pub fn run() -> Result<()> {
         config.startup_prompt_seen = true;
         config.startup_enabled = prompt_yes;
         if let Err(err) = startup::set_startup_enabled(prompt_yes) {
-            println!("Failed to update startup setting from first-run prompt: {err}");
+            logs::warn(format!(
+                "Failed to update startup setting from first-run prompt: {err}"
+            ));
         }
         config::save_config(&config);
     }
 
+    let mut wallpaper_enabled = true;
+    if !config.onboarding_prompt_seen {
+        wallpaper_enabled = startup::prompt_start_wallpaper_now();
+        config.onboarding_prompt_seen = true;
+        config::save_config(&config);
+    }
+
     let asset_root = assets::resolve_asset_root()?;
-    println!("Serving assets from {}", asset_root.display());
+    logs::info(format!("Serving assets from {}", asset_root.display()));
 
     let init_script = r#"
             (() => {
@@ -141,6 +253,7 @@ pub fn run() -> Result<()> {
             })();
         "#;
 
+    let (host_cmd_tx, host_cmd_rx) = mpsc::channel::<HostCommand>();
     let webview = WebViewBuilder::new()
         .with_custom_protocol(String::from("forma"), move |_webview_id, request| {
             assets::build_asset_response(&request, &asset_root)
@@ -151,13 +264,35 @@ pub fn run() -> Result<()> {
             let parsed = serde_json::from_str::<IpcMessage>(&payload);
             match parsed {
                 Ok(msg) if msg.message_type == "WebReady" => {
-                    println!("IPC: received WebReady from web app");
+                    logs::info("IPC: received WebReady from web app");
+                }
+                Ok(msg) if msg.message_type == "SetWallpaperActive" => {
+                    if let Some(active) = msg.payload.and_then(|p| p.active) {
+                        if let Err(err) = host_cmd_tx.send(HostCommand::SetWallpaperActive(active)) {
+                            logs::warn(format!("Failed to queue host command from webview: {err}"));
+                        }
+                    } else {
+                        logs::warn("IPC SetWallpaperActive missing payload.active");
+                    }
+                }
+                Ok(msg) if msg.message_type == "SetDesktopConfig" => {
+                    if let Some(payload) = msg.payload {
+                        if let Err(err) = host_cmd_tx.send(HostCommand::SetDesktopConfig {
+                            resolution: payload.resolution,
+                            fps_cap: payload.fps_cap,
+                            theme: payload.theme,
+                        }) {
+                            logs::warn(format!("Failed to queue config command from webview: {err}"));
+                        }
+                    } else {
+                        logs::warn("IPC SetDesktopConfig missing payload");
+                    }
                 }
                 Ok(msg) => {
-                    println!("IPC: received {}", msg.message_type);
+                    logs::info(format!("IPC: received {}", msg.message_type));
                 }
                 Err(_) => {
-                    println!("IPC: unparsed payload: {}", payload);
+                    logs::warn(format!("IPC: unparsed payload: {}", payload));
                 }
             }
         })
@@ -165,14 +300,13 @@ pub fn run() -> Result<()> {
         .build(&window)
         .context("failed to build webview")?;
 
-    let (tray_icon, tray_ids, tray_ui) =
-        tray::create_tray_icon(&config).context("failed to create system tray")?;
+    let (tray_icon, tray_ids, tray_ui) = tray::create_tray_icon(&config, wallpaper_enabled)
+        .context("failed to create system tray")?;
 
-    let mut wallpaper_enabled = true;
     let mut wallpaper_state = if wallpaper_enabled {
         wallpaper::start_wallpaper_mode(&window)
     } else {
-        wallpaper::stop_wallpaper_mode(&window)
+        wallpaper::stop_wallpaper_mode(&window, true)
     };
     webview_bridge::apply_config_to_webview(&webview, &config);
     webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
@@ -197,89 +331,202 @@ pub fn run() -> Result<()> {
             let delay_ms = if viewport_active { 16 } else { 250 };
             ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(delay_ms))
         } else {
-            ControlFlow::Wait
+            // Keep polling host/webview command channel even in controls mode so
+            // UI actions (like wallpaper toggle) apply immediately.
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50))
         };
 
         if let Event::MainEventsCleared = event {
             while let Ok(menu_event) = menu_events.try_recv() {
-                if menu_event.id == tray_ids.start {
-                    wallpaper_enabled = true;
-                    wallpaper_state = wallpaper::start_wallpaper_mode(&window);
+                if menu_event.id == tray_ids.open_controls {
+                    if wallpaper_enabled {
+                        wallpaper_enabled = false;
+                        wallpaper_state = wallpaper::stop_wallpaper_mode(&window, true);
+                        webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
+                    }
+                    viewport_active = false;
+                    webview_bridge::apply_viewport_active_to_webview(&webview, viewport_active);
+                    last_cursor = None;
+                    window.set_visible(true);
+                    window.set_focus();
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
+                    logs::info("Opened controls window from tray.");
+                } else if menu_event.id == tray_ids.wallpaper_enabled {
+                    let next = !wallpaper_enabled;
+                    wallpaper_enabled = next;
+                    wallpaper_state = if wallpaper_enabled {
+                        wallpaper::start_wallpaper_mode(&window)
+                    } else {
+                        wallpaper::stop_wallpaper_mode(&window, false)
+                    };
                     webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
-                    viewport_active = wallpaper_state.attached
+                    viewport_active = wallpaper_enabled
+                        && wallpaper_state.attached
                         && wallpaper::is_desktop_view_active(wallpaper_state.workerw);
                     webview_bridge::apply_viewport_active_to_webview(&webview, viewport_active);
                     if !viewport_active {
                         last_cursor = None;
                     }
-                } else if menu_event.id == tray_ids.stop {
-                    wallpaper_enabled = false;
-                    wallpaper_state = wallpaper::stop_wallpaper_mode(&window);
-                    webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
-                    viewport_active = false;
-                    webview_bridge::apply_viewport_active_to_webview(&webview, viewport_active);
-                    last_cursor = None;
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
+                    logs::info(if wallpaper_enabled {
+                        "Wallpaper enabled from tray toggle."
+                    } else {
+                        "Wallpaper disabled from tray toggle."
+                    });
                 } else if menu_event.id == tray_ids.startup_enabled {
                     let next = !config.startup_enabled;
                     config.startup_enabled = next;
                     if let Err(err) = startup::set_startup_enabled(next) {
-                        println!("Failed to update startup registry entry: {err}");
+                        logs::warn(format!("Failed to update startup registry entry: {err}"));
                         config.startup_enabled = !next;
                     }
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
+                } else if menu_event.id == tray_ids.check_updates {
+                    if let Err(err) = release_ops::open_releases_page() {
+                        logs::warn(format!("Failed to open releases page: {err}"));
+                    } else {
+                        logs::info("Opened releases page.");
+                    }
+                } else if menu_event.id == tray_ids.export_diagnostics {
+                    match release_ops::export_diagnostics() {
+                        Ok(path) => {
+                            let _ = release_ops::open_path_in_explorer(&path);
+                        }
+                        Err(err) => {
+                            logs::warn(format!("Failed to export diagnostics: {err}"));
+                        }
+                    }
                 } else if menu_event.id == tray_ids.res_512 {
                     config.resolution = 512;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.res_768 {
                     config.resolution = 768;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.res_1024 {
                     config.resolution = 1024;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.fps_30 {
                     config.fps_cap = 30;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.fps_60 {
                     config.fps_cap = 60;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.fps_120 {
                     config.fps_cap = 120;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.theme_0 {
                     config.theme = 0;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.theme_1 {
                     config.theme = 1;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.theme_2 {
                     config.theme = 2;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
                 } else if menu_event.id == tray_ids.theme_3 {
                     config.theme = 3;
-                    tray::sync_tray_checks(&tray_ui, &config);
+                    tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
                     config::save_config(&config);
                     webview_bridge::apply_config_to_webview(&webview, &config);
+                } else if menu_event.id == tray_ids.open_logs {
+                    if let Err(err) = logs::open_logs_folder() {
+                        logs::warn(format!("Failed to open logs folder: {err}"));
+                    }
+                } else if menu_event.id == tray_ids.about {
+                    startup::show_about_dialog(logs::log_path());
                 } else if menu_event.id == tray_ids.exit {
+                    logs::info("Exit selected from tray.");
                     *control_flow = ControlFlow::Exit;
+                }
+            }
+
+            while let Ok(cmd) = host_cmd_rx.try_recv() {
+                match cmd {
+                    HostCommand::SetWallpaperActive(active) => {
+                        if wallpaper_enabled == active {
+                            continue;
+                        }
+                        wallpaper_enabled = active;
+                        wallpaper_state = if wallpaper_enabled {
+                            wallpaper::start_wallpaper_mode(&window)
+                        } else {
+                            wallpaper::stop_wallpaper_mode(&window, false)
+                        };
+                        webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
+                        viewport_active = wallpaper_enabled
+                            && wallpaper_state.attached
+                            && wallpaper::is_desktop_view_active(wallpaper_state.workerw);
+                        webview_bridge::apply_viewport_active_to_webview(&webview, viewport_active);
+                        if !viewport_active {
+                            last_cursor = None;
+                        }
+                        tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
+                        logs::info(if wallpaper_enabled {
+                            "Wallpaper enabled from controls window."
+                        } else {
+                            "Wallpaper disabled from controls window."
+                        });
+                    }
+                    HostCommand::SetDesktopConfig {
+                        resolution,
+                        fps_cap,
+                        theme,
+                    } => {
+                        let mut changed = false;
+
+                        if let Some(res) = resolution {
+                            let next = normalize_tray_resolution(res);
+                            if config.resolution != next {
+                                config.resolution = next;
+                                changed = true;
+                            }
+                        }
+
+                        if let Some(fps) = fps_cap {
+                            let next = normalize_tray_fps(fps);
+                            if config.fps_cap != next {
+                                config.fps_cap = next;
+                                changed = true;
+                            }
+                        }
+
+                        if let Some(theme_idx) = theme {
+                            let next = theme_idx.min(3);
+                            if config.theme != next {
+                                config.theme = next;
+                                changed = true;
+                            }
+                        }
+
+                        if changed {
+                            tray::sync_tray_checks(&tray_ui, &config, wallpaper_enabled);
+                            config::save_config(&config);
+                            webview_bridge::apply_config_to_webview(&webview, &config);
+                            logs::info(format!(
+                                "Applied config patch from controls window: res={} fps={} theme={}",
+                                config.resolution, config.fps_cap, config.theme
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -288,7 +535,7 @@ pub fn run() -> Result<()> {
                 && last_rebind_probe.elapsed() >= Duration::from_secs(2)
             {
                 if !wallpaper::is_window_valid(wallpaper_state.workerw) {
-                    println!("WorkerW host was lost (Explorer restart likely). Reattaching...");
+                    logs::warn("WorkerW host was lost (Explorer restart likely). Reattaching...");
                     wallpaper_state = wallpaper::start_wallpaper_mode(&window);
                     webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
                     viewport_active = wallpaper_state.attached
@@ -297,6 +544,8 @@ pub fn run() -> Result<()> {
                     if !viewport_active {
                         last_cursor = None;
                     }
+                } else {
+                    wallpaper::refresh_wallpaper_bounds(&window, wallpaper_state.workerw);
                 }
                 last_rebind_probe = Instant::now();
             }
@@ -361,7 +610,7 @@ pub fn run() -> Result<()> {
                     let delay_ms = if viewport_active { 16 } else { 250 };
                     ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(delay_ms))
                 } else {
-                    ControlFlow::Wait
+                    ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50))
                 };
             }
         }
@@ -372,7 +621,28 @@ pub fn run() -> Result<()> {
         } = event
         {
             window.set_visible(false);
-            println!("Window hidden to tray. Use tray menu Exit to quit.");
+            logs::info("Window hidden to tray. Use tray menu Exit to quit.");
+        }
+
+        if matches!(event, Event::Resumed) {
+            logs::info("System resumed; revalidating wallpaper host.");
+            if wallpaper_enabled {
+                if !wallpaper_state.attached || !wallpaper::is_window_valid(wallpaper_state.workerw) {
+                    wallpaper_state = wallpaper::start_wallpaper_mode(&window);
+                    webview_bridge::apply_wallpaper_session_to_webview(&webview, wallpaper_enabled);
+                }
+                viewport_active = wallpaper_state.attached
+                    && wallpaper::is_desktop_view_active(wallpaper_state.workerw);
+                webview_bridge::apply_viewport_active_to_webview(&webview, viewport_active);
+                if !viewport_active {
+                    last_cursor = None;
+                }
+            }
+        }
+
+        if matches!(event, Event::Suspended) {
+            logs::info("System suspended.");
+            last_cursor = None;
         }
     });
 
