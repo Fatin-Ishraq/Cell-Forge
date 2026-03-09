@@ -37,12 +37,34 @@ pub(super) fn stop_wallpaper_mode(
 ) -> WallpaperState {
     let hwnd = window.hwnd() as HWND;
     detach_from_workerw(hwnd);
-    window.set_decorations(true);
-    if let Err(err) = window.set_skip_taskbar(false) {
-        println!("Failed to restore taskbar entry: {err}");
+    if show_controls_window {
+        window.set_decorations(true);
+        if let Err(err) = window.set_skip_taskbar(false) {
+            println!("Failed to restore taskbar entry: {err}");
+        }
+        window.set_visible(true);
+        println!("Wallpaper stopped; running as normal window.");
+    } else {
+        // Keep the wallpaper runtime alive by parking the window off-screen
+        // without taskbar presence.
+        window.set_decorations(false);
+        if let Err(err) = window.set_skip_taskbar(true) {
+            println!("Failed to hide taskbar entry for parked engine window: {err}");
+        }
+        window.set_visible(true);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                null_mut(),
+                -32000,
+                -32000,
+                64,
+                64,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+            );
+        }
+        println!("Wallpaper stopped; engine parked off-screen for controls mode.");
     }
-    window.set_visible(show_controls_window);
-    println!("Wallpaper stopped; running as normal window.");
     WallpaperState {
         attached: false,
         workerw: null_mut(),

@@ -15,7 +15,7 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap"
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
         rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -42,14 +42,23 @@
 
     <!-- Top Bar -->
     <div id="top-bar" class="panel">
-        <div class="panel-section">
-            <button id="btn-about" class="btn" title="About and shortcuts">ABOUT</button>
-            <button id="btn-wallpaper-toggle" class="btn" title="Toggle desktop wallpaper mode" style="display:none">WALLPAPER: OFF</button>
-            <button id="btn-ambient" class="btn" title="Toggle ambient mode (A)">AMBIENT</button>
+        <div class="panel-section panel-section-session">
+            <span class="section-kicker">Session</span>
+            <button id="btn-wallpaper-toggle" class="btn" aria-pressed="false" title="Toggle desktop wallpaper mode" style="display:none">WALLPAPER: OFF</button>
+            <button id="btn-apply-wallpaper" class="btn" title="Apply current controls state to wallpaper" style="display:none">SET WALLPAPER</button>
+            <button id="btn-interaction-profile" class="btn" title="Cycle wallpaper interaction profile" style="display:none">INTERACT: BALANCED</button>
+            <button id="btn-present" class="btn" aria-pressed="false" title="Toggle presentation mode">PRESENT</button>
+        </div>
+        <div class="panel-section panel-section-canvas">
+            <span class="section-kicker">Canvas</span>
+            <button id="btn-ambient" class="btn" aria-pressed="false" title="Toggle ambient mode (A)">AMBIENT</button>
             <button id="btn-theme" class="btn" title="Cycle visual theme (D)">THEME: LAB</button>
-            <button id="btn-present" class="btn" title="Toggle presentation mode">PRESENT</button>
-            <button id="btn-export" class="btn" title="Export grid as PNG">EXPORT PNG</button>
-            <button id="btn-random-rule" class="btn accent" title="Randomize rules and grid">⚡ RANDOM RULE</button>
+            <button id="btn-export" class="btn" title="Export grid as PNG">EXPORT</button>
+            <button id="btn-random-rule" class="btn accent" title="Randomize rules and grid">RANDOM RULE</button>
+        </div>
+        <div class="panel-section panel-section-system">
+            <span class="section-kicker">System</span>
+            <button id="btn-about" class="btn" aria-pressed="false" title="Help and shortcuts">HELP</button>
         </div>
     </div>
 
@@ -176,13 +185,20 @@
                     <div class="about-kicker">ABOUT FORMA</div>
                     <h2 id="about-title">Cellular automata sandbox</h2>
                 </div>
-                <button id="btn-about-close" class="btn" title="Close about panel">CLOSE</button>
+                <button id="btn-about-close" class="btn" type="button" title="Close about panel">CLOSE</button>
             </div>
 
             <div class="about-grid">
                 <section class="about-section">
                     <h3>What this is</h3>
-                    <p>Forma is a browser sandbox for exploring emergent behavior on a high-resolution grid. Paint cells, change rules, export stills, and switch visual themes to turn the same simulation into very different atmospheres.</p>
+                    <p>Forma is a real-time cellular automata canvas for both desktop wallpaper mode and controls mode. You can paint directly with cursor movement, tune rules, then return to a clean wallpaper view with no on-screen controls.</p>
+                </section>
+
+                <section class="about-section">
+                    <h3>Desktop workflow</h3>
+                    <p><strong>Wallpaper mode</strong>: no visible UI, reactive cursor painting, low-overhead behavior when the desktop is not visible.</p>
+                    <p><strong>Controls mode</strong>: full editor panels for rules, speed, brush, and visual theme adjustments.</p>
+                    <p>Use the system tray to toggle wallpaper state, open controls, and adjust desktop settings instantly.</p>
                 </section>
 
                 <section class="about-section">

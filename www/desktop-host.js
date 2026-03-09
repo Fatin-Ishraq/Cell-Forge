@@ -34,6 +34,11 @@ export function createDesktopHostBridge(handlers) {
             }
             if (message.type === 'CursorMove') {
                 handlers.onCursorMove?.(message.payload || {});
+                return;
+            }
+            if (message.type === 'ApplyWallpaperSettings') {
+                handlers.onApplyWallpaperSettings?.(message.payload || {});
+                return;
             }
         });
 
@@ -64,5 +69,14 @@ export function createDesktopHostBridge(handlers) {
         post('SetDesktopConfig', patch || {});
     }
 
-    return { setup, setWallpaperActive, setDesktopConfig };
+    function applyWallpaperSettings(settings) {
+        post('ApplyWallpaperSettings', { settings: settings || {} });
+    }
+
+    return {
+        setup,
+        setWallpaperActive,
+        setDesktopConfig,
+        applyWallpaperSettings,
+    };
 }

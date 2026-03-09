@@ -339,6 +339,34 @@ impl Simulation {
         self.pixels.len()
     }
 
+    pub fn get_cells_ptr(&self) -> *const u8 {
+        if self.use_a {
+            self.cells_a.as_ptr()
+        } else {
+            self.cells_b.as_ptr()
+        }
+    }
+
+    pub fn get_cells_len(&self) -> usize {
+        self.total
+    }
+
+    pub fn set_cells_from_slice(&mut self, data: &[u8]) {
+        let src_len = data.len().min(self.total);
+        self.cells_a[..src_len].copy_from_slice(&data[..src_len]);
+        self.cells_b[..src_len].copy_from_slice(&data[..src_len]);
+        if src_len < self.total {
+            self.cells_a[src_len..].fill(0);
+            self.cells_b[src_len..].fill(0);
+        }
+        self.use_a = true;
+        self.population = self
+            .cells_a
+            .iter()
+            .map(|&v| if v > 0 { 1u32 } else { 0u32 })
+            .sum();
+    }
+
     pub fn set_cell(&mut self, x: u32, y: u32, state: u8) {
         let x = x as usize % self.width;
         let y = y as usize % self.height;

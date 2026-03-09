@@ -61,3 +61,23 @@ pub(super) fn apply_cursor_to_webview(webview: &wry::WebView, x: i32, y: i32) {
         println!("Failed to apply cursor update in webview: {err}");
     }
 }
+
+pub(super) fn apply_wallpaper_settings_to_webview(
+    webview: &wry::WebView,
+    settings: &serde_json::Value,
+) {
+    let settings_json = match serde_json::to_string(settings) {
+        Ok(value) => value,
+        Err(err) => {
+            println!("Failed to serialize wallpaper settings payload: {err}");
+            return;
+        }
+    };
+    let script = format!(
+        "window.dispatchEvent(new CustomEvent('forma-host-message', {{ detail: {{ type: 'ApplyWallpaperSettings', payload: {{ settings: {} }} }} }}));",
+        settings_json
+    );
+    if let Err(err) = webview.evaluate_script(&script) {
+        println!("Failed to apply wallpaper settings in webview: {err}");
+    }
+}

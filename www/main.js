@@ -7,6 +7,30 @@ import init, { Simulation } from './pkg/forma.js?v=theme2';
 import { createDesktopHostBridge } from './desktop-host.js';
 import { AMBIENT_SCENES, CONWAY_PRESETS, GEN_PRESETS, THEMES } from './presets.js';
 import { BLOOM_FRAG, BLOOM_VERT, FRAG_SRC, VERT_SRC } from './shaders.js';
+import { safeReadStorage, safeWriteStorage, isDesktopRuntime } from './modules/runtime.js';
+import {
+    clampToTier,
+    tierIndex,
+    detectAutoTargetResolution as detectAutoTargetResolutionFromDevice,
+    clampSpeed,
+    speedFromSlider,
+    sliderFromSpeed,
+} from './modules/sim-utils.js';
+import {
+    INTERACTION_PROFILES,
+    normalizeInteractionProfile,
+    getInteractionProfileConfig,
+    screenFromHostToClient,
+} from './modules/desktop-interaction.js';
+import { createProgram } from './modules/webgl-utils.js';
+import {
+    clampDesktopMask,
+    clampDesktopGenerations,
+    normalizeConwayPresetName,
+    normalizeGenerationsPresetName,
+    buildDesktopRuleStatePayload,
+    parseDesktopRuleState,
+} from './modules/rule-state.js';
 
 const desktopHost = createDesktopHostBridge({
     onApplyConfig: applyDesktopConfig,
@@ -14,6 +38,7 @@ const desktopHost = createDesktopHostBridge({
     onViewportActive: setDesktopViewportActive,
     onPowerState: setDesktopPowerState,
     onCursorMove: applyDesktopCursorMove,
+    onApplyWallpaperSettings: applyWallpaperSettingsFromHost,
 });
 
 // ── Globals ────────────────────────────────────────────────────────────
@@ -43,6 +68,7 @@ let desktopPendingConfig = null;
 let wallpaperSessionActive = false;
 let wallpaperTogglePendingTarget = null;
 let wallpaperTogglePendingTimer = 0;
+let controlsRevealTimer = 0;
 let suppressHostConfigEmit = false;
 let desktopViewportActive = true;
 let desktopOnBattery = false;
@@ -50,6 +76,9 @@ let loopSuspended = false;
 let batteryEcoResolutionActive = false;
 let batteryEcoBaseResolution = null;
 let hostCursorLast = null;
+let hostCursorLastPaintAt = 0;
+let wallpaperApplyDirty = false;
+let wallpaperApplyPending = false;
 
 // Brush state
 let brushSize = 4;
@@ -64,6 +93,7 @@ let squareBrushFillState = paintState;
 squareBrushBuffer.fill(paintState);
 let presentationMode = false;
 let aboutOpen = false;
+let aboutReturnFocusEl = null;
 let currentTheme = 0;
 let themeBadgeTimeout = null;
 let bloomStrength = 0.35;
@@ -80,6 +110,7 @@ let touchPrevDistance = 0;
 let touchPrevCenterX = 0;
 let touchPrevCenterY = 0;
 let loopTimerId = 0;
+let layoutObserver = null;
 const RENDER_RESOLUTION = 1024;
 let simResolution = 1024;
 const GRID_TIERS = [384, 512, 640, 768, 896, 1024, 1280];
@@ -97,6 +128,7 @@ const ADAPTIVE_LOW_WINDOW_MS = 6500;
 const ADAPTIVE_HIGH_WINDOW_MS = 22000;
 const ADAPTIVE_COOLDOWN_MS = 12000;
 const BATTERY_WALLPAPER_FPS_CAP = 20;
+let interactionProfile = 1;
 
 // FPS tracking
 const fpsSamples = new Array(60).fill(16.67);
@@ -136,31 +168,6 @@ const IDLE_FRAME_DELAY_MS = 180;
 // WebGL Setup
 // ═══════════════════════════════════════════════════════════════════════
 
-function compileShader(src, type) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-        console.error('Shader error:', gl.getShaderInfoLog(s));
-        return null;
-    }
-    return s;
-}
-
-function createProgram(vSrc, fSrc) {
-    const v = compileShader(vSrc, gl.VERTEX_SHADER);
-    const f = compileShader(fSrc, gl.FRAGMENT_SHADER);
-    const p = gl.createProgram();
-    gl.attachShader(p, v);
-    gl.attachShader(p, f);
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-        console.error('Program error:', gl.getProgramInfoLog(p));
-        return null;
-    }
-    return p;
-}
-
 function applyRenderResolution() {
     if (!canvas || !gl) return;
     canvas.width = RENDER_RESOLUTION;
@@ -195,63 +202,42 @@ function reallocateSimulationTexture() {
     resetPixelCache();
 }
 
-function safeReadStorage(key) {
-    try {
-        return window.localStorage.getItem(key);
-    } catch (_) {
-        return null;
-    }
-}
-
-function safeWriteStorage(key, value) {
-    try {
-        window.localStorage.setItem(key, value);
-    } catch (_) {}
-}
-
-function isDesktopRuntime() {
-    if (typeof window === 'undefined') return false;
-    return window.__FORMA_DESKTOP__ === true || (!!window.ipc && typeof window.ipc.postMessage === 'function');
-}
-
 function pushDesktopConfigPatch(patch) {
     if (!isDesktopRuntime() || suppressHostConfigEmit) return;
     desktopHost.setDesktopConfig(patch || {});
 }
 
-function clampDesktopMask(mask, fallback) {
-    if (!Number.isInteger(mask)) return fallback;
-    if (mask < 0 || mask > 511) return fallback;
-    return mask;
+function desktopSurface() {
+    if (typeof window === 'undefined') return 'web';
+    let value = String(window.__FORMA_SURFACE__ || '').toLowerCase();
+    if (!value) {
+        const queryValue = new URLSearchParams(window.location.search).get('surface');
+        value = String(queryValue || '').toLowerCase();
+    }
+    if (value === 'wallpaper' || value === 'controls') return value;
+    return 'web';
 }
 
-function clampDesktopGenerations(value, fallback = 3) {
-    if (!Number.isInteger(value)) return fallback;
-    return Math.max(2, Math.min(20, value));
+function isControlsSurface() {
+    return desktopSurface() === 'controls';
 }
 
-function normalizeConwayPresetName(name) {
-    return typeof name === 'string' && Object.prototype.hasOwnProperty.call(CONWAY_PRESETS, name)
-        ? name
-        : 'life';
-}
-
-function normalizeGenerationsPresetName(name) {
-    return typeof name === 'string' && Object.prototype.hasOwnProperty.call(GEN_PRESETS, name)
-        ? name
-        : 'starwars';
+function currentInteractionProfileConfig() {
+    return getInteractionProfileConfig(interactionProfile);
 }
 
 function persistDesktopRuleState() {
     if (!isDesktopRuntime() || !sim) return;
-    const payload = {
-        mode: currentMode === 1 ? 1 : 0,
-        birth_mask: Number(sim.get_birth_mask()) | 0,
-        survival_mask: Number(sim.get_survival_mask()) | 0,
-        generations: clampDesktopGenerations(generationsCount, 3),
-        preset_conway: normalizeConwayPresetName(selectedConwayPreset),
-        preset_gen: normalizeGenerationsPresetName(selectedGenerationsPreset),
-    };
+    const payload = buildDesktopRuleStatePayload({
+        currentMode,
+        birthMask: Number(sim.get_birth_mask()),
+        survivalMask: Number(sim.get_survival_mask()),
+        generationsCount,
+        selectedConwayPreset,
+        selectedGenerationsPreset,
+        conwayPresets: CONWAY_PRESETS,
+        generationsPresets: GEN_PRESETS,
+    });
     safeWriteStorage(DESKTOP_RULE_STATE_KEY, JSON.stringify(payload));
 }
 
@@ -259,20 +245,10 @@ function loadDesktopRuleState() {
     if (!isDesktopRuntime()) return null;
     const raw = safeReadStorage(DESKTOP_RULE_STATE_KEY);
     if (!raw) return null;
-    try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || (parsed.mode !== 0 && parsed.mode !== 1)) return null;
-        return {
-            mode: parsed.mode,
-            birth_mask: clampDesktopMask(parsed.birth_mask, CONWAY_PRESETS.life.b),
-            survival_mask: clampDesktopMask(parsed.survival_mask, CONWAY_PRESETS.life.s),
-            generations: clampDesktopGenerations(parsed.generations, 3),
-            preset_conway: normalizeConwayPresetName(parsed.preset_conway),
-            preset_gen: normalizeGenerationsPresetName(parsed.preset_gen),
-        };
-    } catch (_) {
-        return null;
-    }
+    return parseDesktopRuleState(raw, {
+        conwayPresets: CONWAY_PRESETS,
+        generationsPresets: GEN_PRESETS,
+    });
 }
 
 function applyDesktopRuleState(state) {
@@ -281,8 +257,8 @@ function applyDesktopRuleState(state) {
     const birthMask = clampDesktopMask(state.birth_mask, CONWAY_PRESETS.life.b);
     const survivalMask = clampDesktopMask(state.survival_mask, CONWAY_PRESETS.life.s);
     const nextGenerations = clampDesktopGenerations(state.generations, 3);
-    selectedConwayPreset = normalizeConwayPresetName(state.preset_conway);
-    selectedGenerationsPreset = normalizeGenerationsPresetName(state.preset_gen);
+    selectedConwayPreset = normalizeConwayPresetName(state.preset_conway, CONWAY_PRESETS);
+    selectedGenerationsPreset = normalizeGenerationsPresetName(state.preset_gen, GEN_PRESETS);
 
     updateModeUI(mode);
     sim.set_birth_rule(birthMask);
@@ -319,49 +295,13 @@ function applyDesktopRuleState(state) {
     return true;
 }
 
-function clampToTier(size) {
-    let closest = GRID_TIERS[0];
-    let bestDist = Math.abs(size - closest);
-    for (let i = 1; i < GRID_TIERS.length; i++) {
-        const candidate = GRID_TIERS[i];
-        const dist = Math.abs(size - candidate);
-        if (dist < bestDist) {
-            closest = candidate;
-            bestDist = dist;
-        }
-    }
-    return closest;
-}
-
-function tierIndex(size) {
-    return GRID_TIERS.indexOf(clampToTier(size));
-}
-
 function detectAutoTargetResolution() {
-    const cores = Number(navigator.hardwareConcurrency || 0);
-    const memory = Number(navigator.deviceMemory || 0);
-    const dpr = Math.min(Number(window.devicePixelRatio || 1), 2);
-    const viewport = Math.max(window.innerWidth || 0, window.innerHeight || 0) * dpr;
-    const ua = navigator.userAgent || '';
-    const isMobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
-
-    let target = clampToTier(Math.max(512, Math.min(1280, Math.round(viewport))));
-    let penalty = 0;
-    if (memory > 0 && memory <= 4) penalty += 2;
-    else if (memory > 0 && memory <= 6) penalty += 1;
-    if (cores > 0 && cores <= 4) penalty += 2;
-    else if (cores > 0 && cores <= 6) penalty += 1;
-    if (isMobileUA) penalty += 1;
-
-    let idx = tierIndex(target) - penalty;
-    if (idx < 0) idx = 0;
-    if (idx >= GRID_TIERS.length) idx = GRID_TIERS.length - 1;
-    autoTargetResolution = GRID_TIERS[idx];
+    autoTargetResolution = detectAutoTargetResolutionFromDevice(GRID_TIERS, navigator, window);
     return autoTargetResolution;
 }
 
 function applySimulationResolution(nextSize, reseed = true, emitHost = true) {
-    const size = clampToTier(nextSize);
+    const size = clampToTier(nextSize, GRID_TIERS);
     sim.set_grid_size(size, size);
     syncGridDimensions();
     reallocateSimulationTexture();
@@ -416,7 +356,7 @@ function applyAdaptiveResolution(dt, fps) {
     const now = performance.now();
     if (now < adaptiveCooldownUntil) return;
 
-    const idx = tierIndex(simResolution);
+    const idx = tierIndex(simResolution, GRID_TIERS);
     if (fps < ADAPTIVE_LOW_FPS && idx > 0) {
         adaptiveLowFpsMs += dt;
         adaptiveHighFpsMs = 0;
@@ -426,7 +366,7 @@ function applyAdaptiveResolution(dt, fps) {
         return;
     }
 
-    if (fps > ADAPTIVE_HIGH_FPS && idx < tierIndex(autoTargetResolution)) {
+    if (fps > ADAPTIVE_HIGH_FPS && idx < tierIndex(autoTargetResolution, GRID_TIERS)) {
         adaptiveHighFpsMs += dt;
         adaptiveLowFpsMs = 0;
         if (adaptiveHighFpsMs >= ADAPTIVE_HIGH_WINDOW_MS) {
@@ -449,10 +389,10 @@ function initWebGL() {
     }
 
     // Main program
-    program = createProgram(VERT_SRC, FRAG_SRC);
+    program = createProgram(gl, VERT_SRC, FRAG_SRC);
 
     // Bloom program
-    bloomProgram = createProgram(BLOOM_VERT, BLOOM_FRAG);
+    bloomProgram = createProgram(gl, BLOOM_VERT, BLOOM_FRAG);
 
     // Fullscreen quad
     const quadVerts = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
@@ -680,11 +620,20 @@ function updatePlaybackUI() {
     if (mobileBtn) mobileBtn.textContent = icon;
 }
 
+function setAriaPressed(button, pressed) {
+    if (!button) return;
+    button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+}
+
 function updateWallpaperToggleUI() {
     const btn = document.getElementById('btn-wallpaper-toggle');
     if (!btn) return;
     if (!isDesktopRuntime()) {
-        btn.style.display = 'none';
+        btn.style.display = '';
+        btn.textContent = 'WALLPAPER: DESKTOP ONLY';
+        btn.disabled = true;
+        btn.classList.remove('accent');
+        setAriaPressed(btn, false);
         return;
     }
     btn.style.display = '';
@@ -696,6 +645,133 @@ function updateWallpaperToggleUI() {
         : (effective ? 'SWITCHING: ON...' : 'SWITCHING: OFF...');
     btn.classList.toggle('accent', effective);
     btn.disabled = wallpaperTogglePendingTarget !== null;
+    setAriaPressed(btn, effective);
+}
+
+function updateInteractionProfileUI() {
+    const btn = document.getElementById('btn-interaction-profile');
+    if (!btn) return;
+    if (!isDesktopRuntime()) {
+        btn.style.display = '';
+        btn.textContent = 'INTERACT: DESKTOP ONLY';
+        btn.disabled = true;
+        return;
+    }
+    btn.style.display = '';
+    const profile = currentInteractionProfileConfig();
+    btn.textContent = `INTERACT: ${profile.label}`;
+}
+
+function updateApplyWallpaperUI() {
+    const btn = document.getElementById('btn-apply-wallpaper');
+    if (!btn) return;
+    const enabled = isDesktopRuntime() && isControlsSurface();
+    btn.style.display = enabled ? '' : 'none';
+    if (!enabled) {
+        btn.disabled = true;
+        btn.textContent = 'SET WALLPAPER';
+        btn.classList.remove('accent');
+        return;
+    }
+    if (wallpaperApplyPending) {
+        btn.disabled = true;
+        btn.textContent = 'APPLYING...';
+        btn.classList.add('accent');
+        return;
+    }
+    btn.disabled = !wallpaperApplyDirty;
+    btn.textContent = wallpaperApplyDirty ? 'SET WALLPAPER*' : 'SET WALLPAPER';
+    btn.classList.toggle('accent', wallpaperApplyDirty);
+}
+
+function markWallpaperApplyDirty() {
+    if (!isDesktopRuntime() || !isControlsSurface()) return;
+    wallpaperApplyDirty = true;
+    updateApplyWallpaperUI();
+}
+
+function clearWallpaperApplyDirty() {
+    wallpaperApplyDirty = false;
+    wallpaperApplyPending = false;
+    updateApplyWallpaperUI();
+}
+
+function buildWallpaperSettingsPatch() {
+    if (!sim) return null;
+    return {
+        mode: currentMode,
+        birth_mask: Number(sim.get_birth_mask()),
+        survival_mask: Number(sim.get_survival_mask()),
+        generations: generationsCount,
+        preset_conway: selectedConwayPreset,
+        preset_gen: selectedGenerationsPreset,
+        theme: currentTheme,
+        speed,
+    };
+}
+
+function applyWallpaperSettingsPatch(settings) {
+    if (!settings || !sim) return;
+    disableAmbientMode();
+    closeMobileSheets();
+    if (Number.isFinite(settings.mode)) {
+        updateModeUI(Number(settings.mode) === 1 ? 1 : 0);
+    }
+    if (typeof settings.preset_conway === 'string') {
+        selectedConwayPreset = normalizeConwayPresetName(settings.preset_conway, CONWAY_PRESETS);
+        const conwayPreset = document.getElementById('conway-preset');
+        if (conwayPreset) conwayPreset.value = selectedConwayPreset;
+    }
+    if (typeof settings.preset_gen === 'string') {
+        selectedGenerationsPreset = normalizeGenerationsPresetName(settings.preset_gen, GEN_PRESETS);
+        const genPreset = document.getElementById('gen-preset');
+        if (genPreset) genPreset.value = selectedGenerationsPreset;
+    }
+    if (Number.isFinite(settings.birth_mask)) {
+        sim.set_birth_rule(clampDesktopMask(Number(settings.birth_mask), Number(sim.get_birth_mask())));
+    }
+    if (Number.isFinite(settings.survival_mask)) {
+        sim.set_survival_rule(clampDesktopMask(Number(settings.survival_mask), Number(sim.get_survival_mask())));
+    }
+    if (currentMode === 1 && Number.isFinite(settings.generations)) {
+        generationsCount = clampDesktopGenerations(Number(settings.generations), generationsCount);
+        sim.set_generations(generationsCount);
+        const genStates = document.getElementById('gen-states');
+        const genStatesVal = document.getElementById('gen-states-val');
+        if (genStates) genStates.value = String(generationsCount);
+        if (genStatesVal) genStatesVal.textContent = String(generationsCount);
+        const paintStateInput = document.getElementById('paint-state');
+        if (paintStateInput) paintStateInput.max = String(generationsCount - 1);
+    }
+    if (Number.isFinite(settings.theme)) {
+        applyTheme(Number(settings.theme), false, false);
+    }
+    if (Number.isFinite(settings.speed)) {
+        setSpeed(Number(settings.speed), true, false);
+    }
+    buildCheckboxRow(document.getElementById('birth-row'), 'b', Number(sim.get_birth_mask()));
+    buildCheckboxRow(document.getElementById('survival-row'), 's', Number(sim.get_survival_mask()));
+    buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', Number(sim.get_birth_mask()));
+    buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', Number(sim.get_survival_mask()));
+    persistDesktopRuleState();
+    needsUpload = true;
+    needsRender = true;
+    statsDirty = true;
+}
+
+function applyWallpaperSettingsFromHost(payload) {
+    if (!isDesktopRuntime() || isControlsSurface()) return;
+    applyWallpaperSettingsPatch(payload?.settings || {});
+}
+
+function setInteractionProfile(nextProfile, emitHost = true) {
+    const next = normalizeInteractionProfile(nextProfile);
+    const changed = next !== interactionProfile;
+    interactionProfile = next;
+    updateInteractionProfileUI();
+    if (emitHost && changed) {
+        pushDesktopConfigPatch({ interaction_profile: interactionProfile });
+    }
 }
 
 function updateMobileEraseUI() {
@@ -771,41 +847,68 @@ function setMobileUI(enabled) {
     if (!enabled) {
         closeMobileSheets();
     }
+    syncDesktopLayoutMetrics();
 }
 
-function clampSpeed(value) {
-    return Math.max(1, Math.min(MAX_SPEED, value | 0));
+function syncDesktopLayoutMetrics() {
+    const root = document.documentElement;
+    if (!root) return;
+    if (window.innerWidth <= 760) {
+        root.style.removeProperty('--topbar-stack-h');
+        root.style.removeProperty('--workspace-bottom-reserve');
+        root.style.removeProperty('--zoom-bottom-clearance');
+        return;
+    }
+
+    const topBar = document.getElementById('top-bar');
+    const bottomBar = document.getElementById('bottom-bar');
+    const topHeight = topBar ? Math.ceil(topBar.getBoundingClientRect().height) : 0;
+    const bottomHeight = bottomBar ? Math.ceil(bottomBar.getBoundingClientRect().height) : 0;
+
+    const topStack = Math.max(112, topHeight + 18);
+    const bottomReserve = Math.max(158, bottomHeight + 24);
+    const zoomClearance = Math.max(90, bottomHeight + 14);
+
+    root.style.setProperty('--topbar-stack-h', `${topStack}px`);
+    root.style.setProperty('--workspace-bottom-reserve', `${bottomReserve}px`);
+    root.style.setProperty('--zoom-bottom-clearance', `${zoomClearance}px`);
 }
 
-function speedFromSlider(sliderValue) {
-    const t = Math.max(0, Math.min(SPEED_SLIDER_MAX, sliderValue | 0)) / SPEED_SLIDER_MAX;
-    const mapped = Math.exp(Math.log(MAX_SPEED) * t);
-    return clampSpeed(Math.round(mapped));
-}
-
-function sliderFromSpeed(speedValue) {
-    const s = clampSpeed(speedValue);
-    const t = Math.log(s) / Math.log(MAX_SPEED);
-    return Math.max(0, Math.min(SPEED_SLIDER_MAX, Math.round(t * SPEED_SLIDER_MAX)));
+function setupLayoutObservers() {
+    if (layoutObserver) {
+        layoutObserver.disconnect();
+        layoutObserver = null;
+    }
+    if (typeof ResizeObserver === 'undefined') {
+        return;
+    }
+    const topBar = document.getElementById('top-bar');
+    const bottomBar = document.getElementById('bottom-bar');
+    layoutObserver = new ResizeObserver(() => {
+        syncDesktopLayoutMetrics();
+    });
+    if (topBar) layoutObserver.observe(topBar);
+    if (bottomBar) layoutObserver.observe(bottomBar);
 }
 
 function setSpeed(value, syncSlider = true, emitHost = true) {
-    const nextSpeed = clampSpeed(value);
+    const nextSpeed = clampSpeed(value, MAX_SPEED);
     const changed = nextSpeed !== speed;
     speed = nextSpeed;
     if (syncSlider) {
         const speedSlider = document.getElementById('speed');
-        if (speedSlider) speedSlider.value = sliderFromSpeed(speed);
+        if (speedSlider) speedSlider.value = sliderFromSpeed(speed, SPEED_SLIDER_MAX, MAX_SPEED);
     }
     const speedVal = document.getElementById('speed-val');
     if (speedVal) speedVal.textContent = speed;
     if (emitHost && changed) {
         pushDesktopConfigPatch({ fps_cap: speed });
     }
+    if (changed) markWallpaperApplyDirty();
 }
 
 function effectiveTickRate() {
-    if (isDesktopRuntime() && wallpaperSessionActive && desktopOnBattery) {
+    if (isDesktopRuntime() && wallpaperSessionActive && !isControlsSurface() && desktopOnBattery) {
         return Math.min(speed, BATTERY_WALLPAPER_FPS_CAP);
     }
     return speed;
@@ -813,16 +916,16 @@ function effectiveTickRate() {
 
 function refreshPerformanceOverrides() {
     const theme = THEMES[currentTheme] || THEMES[0];
-    const forceNoBloom = wallpaperSessionActive || (isDesktopRuntime() && desktopOnBattery);
+    const forceNoBloom = (wallpaperSessionActive && !isControlsSurface()) || (isDesktopRuntime() && desktopOnBattery);
     bloomEnabled = !forceNoBloom && theme.bloom && bloomSupported;
 }
 
 function applyBatteryResolutionPolicy() {
     if (!isDesktopRuntime() || !sim) return;
-    const shouldEco = wallpaperSessionActive && desktopOnBattery;
+    const shouldEco = wallpaperSessionActive && !isControlsSurface() && desktopOnBattery;
     if (shouldEco && !batteryEcoResolutionActive) {
         batteryEcoBaseResolution = simResolution;
-        const idx = tierIndex(simResolution);
+        const idx = tierIndex(simResolution, GRID_TIERS);
         if (idx > 0) {
             applySimulationResolution(GRID_TIERS[idx - 1], false);
         }
@@ -830,7 +933,7 @@ function applyBatteryResolutionPolicy() {
         return;
     }
     if (!shouldEco && batteryEcoResolutionActive) {
-        const restore = clampToTier(Number(batteryEcoBaseResolution || simResolution));
+        const restore = clampToTier(Number(batteryEcoBaseResolution || simResolution), GRID_TIERS);
         if (restore !== simResolution) {
             applySimulationResolution(restore, false);
         }
@@ -846,6 +949,21 @@ function ensureLoopRunning() {
     scheduleNextFrame(0);
 }
 
+function triggerControlsReveal() {
+    if (controlsRevealTimer) {
+        clearTimeout(controlsRevealTimer);
+        controlsRevealTimer = 0;
+    }
+    document.body.classList.remove('controls-reveal');
+    // Force reflow so repeated toggles still replay the animation.
+    void document.body.offsetWidth;
+    document.body.classList.add('controls-reveal');
+    controlsRevealTimer = window.setTimeout(() => {
+        document.body.classList.remove('controls-reveal');
+        controlsRevealTimer = 0;
+    }, 320);
+}
+
 function setWallpaperSessionActive(active) {
     wallpaperSessionActive = !!active;
     wallpaperTogglePendingTarget = null;
@@ -853,21 +971,33 @@ function setWallpaperSessionActive(active) {
         clearTimeout(wallpaperTogglePendingTimer);
         wallpaperTogglePendingTimer = 0;
     }
-    document.body.classList.toggle('wallpaper-session', wallpaperSessionActive);
+    const applyWallpaperVisualMode = !isControlsSurface();
+    document.body.classList.toggle('wallpaper-session', wallpaperSessionActive && applyWallpaperVisualMode);
     updateWallpaperToggleUI();
+    updateInteractionProfileUI();
     const exitBtn = document.getElementById('btn-exit-view');
     if (exitBtn) {
-        exitBtn.style.display = wallpaperSessionActive ? 'none' : '';
+        exitBtn.style.display = (wallpaperSessionActive && applyWallpaperVisualMode) ? 'none' : '';
     }
-    if (wallpaperSessionActive) {
+    if (wallpaperSessionActive && applyWallpaperVisualMode) {
+        document.body.classList.remove('controls-reveal');
+        setAboutOpen(false);
+        closeMobileSheets();
         setPresentationMode(true);
-    } else {
-        setPresentationMode(false);
         hostCursorLast = null;
+        hostCursorLastPaintAt = 0;
+    } else {
+        if (applyWallpaperVisualMode) {
+            setPresentationMode(false);
+            triggerControlsReveal();
+        }
+        hostCursorLast = null;
+        hostCursorLastPaintAt = 0;
         ensureLoopRunning();
     }
     refreshPerformanceOverrides();
     applyBatteryResolutionPolicy();
+    syncDesktopLayoutMetrics();
 }
 
 function setDesktopViewportActive(active) {
@@ -875,6 +1005,7 @@ function setDesktopViewportActive(active) {
     desktopViewportActive = !!active;
     if (!desktopViewportActive) {
         hostCursorLast = null;
+        hostCursorLastPaintAt = 0;
         tickAccumulator = 0;
     } else if (!wasActive && desktopViewportActive) {
         ensureLoopRunning();
@@ -890,6 +1021,18 @@ function setDesktopPowerState(onBattery) {
 function applyDesktopConfig(payload) {
     if (!sim) {
         desktopPendingConfig = payload;
+        if (isControlsSurface()) {
+            const cfg = payload || {};
+            if (Number.isFinite(cfg.fps_cap)) {
+                setSpeed(Number(cfg.fps_cap), true, false);
+            }
+            if (Number.isFinite(cfg.theme)) {
+                applyTheme(Number(cfg.theme), false, false);
+            }
+            if (Number.isFinite(cfg.interaction_profile)) {
+                setInteractionProfile(Number(cfg.interaction_profile), false);
+            }
+        }
         return;
     }
     const cfg = payload || {};
@@ -905,62 +1048,63 @@ function applyDesktopConfig(payload) {
     if (Number.isFinite(cfg.theme)) {
         applyTheme(Number(cfg.theme), false, false);
     }
+    if (Number.isFinite(cfg.interaction_profile)) {
+        setInteractionProfile(Number(cfg.interaction_profile), false);
+    }
     suppressHostConfigEmit = false;
 }
 
-function screenFromHostToClient(payload) {
-    const px = Number(payload?.x);
-    const py = Number(payload?.y);
-    if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
-    const width = canvas?.clientWidth || window.innerWidth;
-    const height = canvas?.clientHeight || window.innerHeight;
-
-    const sw = Number(payload?.screen_w);
-    const sh = Number(payload?.screen_h);
-    if (Number.isFinite(sw) && Number.isFinite(sh) && sw > 0 && sh > 0) {
-        return {
-            x: Math.max(0, Math.min(width - 1, (px / sw) * width)),
-            y: Math.max(0, Math.min(height - 1, (py / sh) * height)),
-        };
-    }
-
-    const originX = Number.isFinite(window.screenX) ? window.screenX : (window.screenLeft || 0);
-    const originY = Number.isFinite(window.screenY) ? window.screenY : (window.screenTop || 0);
-    const localX = px - originX;
-    const localY = py - originY;
-    if (localX < -2 || localY < -2 || localX > width + 2 || localY > height + 2) {
-        return null;
-    }
-    return {
-        x: Math.max(0, Math.min(width - 1, localX)),
-        y: Math.max(0, Math.min(height - 1, localY)),
-    };
+function paintHostProfilePoint(point, profile) {
+    paintAt(point.x, point.y, false);
+    const splash = Number(profile?.splashPx || 0);
+    if (splash <= 0) return;
+    // Thicken expressive profile so it visibly differs from subtle/balanced.
+    paintAt(point.x + splash, point.y, false);
+    paintAt(point.x - splash, point.y, false);
+    paintAt(point.x, point.y + splash, false);
+    paintAt(point.x, point.y - splash, false);
 }
 
 function paintFromHostCursor(payload) {
     if (!wallpaperSessionActive || !desktopViewportActive || !sim || !playing) {
         hostCursorLast = null;
+        hostCursorLastPaintAt = 0;
         return;
     }
-    const point = screenFromHostToClient(payload);
+    const point = screenFromHostToClient(payload, canvas, window);
     if (!point) {
         hostCursorLast = null;
+        hostCursorLastPaintAt = 0;
+        return;
+    }
+    const profile = currentInteractionProfileConfig();
+    const now = performance.now();
+    if (profile.minIntervalMs > 0 && (now - hostCursorLastPaintAt) < profile.minIntervalMs) {
         return;
     }
     if (!hostCursorLast) {
-        paintAt(point.x, point.y, false);
+        paintHostProfilePoint(point, profile);
         hostCursorLast = point;
+        hostCursorLastPaintAt = now;
         return;
     }
     const dx = point.x - hostCursorLast.x;
     const dy = point.y - hostCursorLast.y;
     const distance = Math.max(Math.abs(dx), Math.abs(dy));
-    const steps = Math.max(1, Math.ceil(distance / 3));
-    for (let i = 1; i <= steps; i++) {
-        const t = i / steps;
-        paintAt(hostCursorLast.x + dx * t, hostCursorLast.y + dy * t, false);
+    if (distance < profile.minDistance) {
+        return;
     }
+    const steps = Math.min(profile.maxSteps, Math.max(1, Math.ceil(distance / profile.interpolateStep)));
+    for (let i = 1; i <= steps; i += profile.sampleStride) {
+        const t = i / steps;
+        paintHostProfilePoint(
+            { x: hostCursorLast.x + dx * t, y: hostCursorLast.y + dy * t },
+            profile
+        );
+    }
+    paintHostProfilePoint(point, profile);
     hostCursorLast = point;
+    hostCursorLastPaintAt = now;
 }
 
 function applyDesktopCursorMove(payload) {
@@ -972,15 +1116,19 @@ function updateAmbientUI() {
     if (!btn) return;
     btn.textContent = ambientMode ? 'AMBIENT ON' : 'AMBIENT';
     btn.classList.toggle('accent', ambientMode);
+    setAriaPressed(btn, ambientMode);
 }
 
 function updateModeUI(mode) {
     currentMode = mode;
-    sim.set_rule_mode(mode);
+    if (sim) sim.set_rule_mode(mode);
 
-    document.getElementById('conway-rules').style.display = mode === 0 ? 'block' : 'none';
-    document.getElementById('generations-rules').style.display = mode === 1 ? 'block' : 'none';
-    document.getElementById('paint-state-section').style.display = mode === 1 ? 'block' : 'none';
+    const conwayRules = document.getElementById('conway-rules');
+    const genRules = document.getElementById('generations-rules');
+    const paintSection = document.getElementById('paint-state-section');
+    if (conwayRules) conwayRules.style.display = mode === 0 ? 'block' : 'none';
+    if (genRules) genRules.style.display = mode === 1 ? 'block' : 'none';
+    if (paintSection) paintSection.style.display = mode === 1 ? 'block' : 'none';
 
     document.querySelectorAll('#mode-toggle .mode-btn').forEach(btn => {
         btn.classList.toggle('active', parseInt(btn.dataset.mode) === mode);
@@ -998,7 +1146,7 @@ function applyPreset(mode, name) {
 }
 
 function setPresentationMode(enabled) {
-    if (wallpaperSessionActive && !enabled) return;
+    if (wallpaperSessionActive && !enabled && !isControlsSurface()) return;
     presentationMode = enabled;
     document.body.classList.toggle('presentation', enabled);
     if (enabled) {
@@ -1008,23 +1156,65 @@ function setPresentationMode(enabled) {
         setAboutOpen(false);
     }
     const btn = document.getElementById('btn-present');
-    btn.textContent = enabled ? 'EDIT MODE' : 'PRESENT';
-    btn.classList.toggle('accent', enabled);
+    if (btn) {
+        btn.textContent = enabled ? 'EDIT MODE' : 'PRESENT';
+        btn.classList.toggle('accent', enabled);
+        setAriaPressed(btn, enabled);
+    }
     needsRender = true;
 }
 
+function trapAboutFocus(e) {
+    if (!aboutOpen || e.key !== 'Tab') return false;
+    const dialog = document.getElementById('about-dialog');
+    if (!dialog) return false;
+    const focusables = Array.from(
+        dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+    ).filter((el) => !el.hasAttribute('disabled'));
+    if (focusables.length === 0) return false;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+
+    if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+            e.preventDefault();
+            last.focus();
+            return true;
+        }
+    } else if (active === last || !dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+        return true;
+    }
+    return false;
+}
+
 function setAboutOpen(enabled) {
+    if (aboutOpen === enabled) return;
     aboutOpen = enabled;
     const modal = document.getElementById('about-modal');
+    const aboutBtn = document.getElementById('btn-about');
     modal.classList.toggle('open', enabled);
     modal.setAttribute('aria-hidden', enabled ? 'false' : 'true');
+    setAriaPressed(aboutBtn, enabled);
     if (enabled) {
+        aboutReturnFocusEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         closeMobileSheets();
+        requestAnimationFrame(() => {
+            document.getElementById('btn-about-close')?.focus();
+        });
+    } else {
+        if (aboutReturnFocusEl && aboutReturnFocusEl.isConnected) {
+            aboutReturnFocusEl.focus();
+        }
+        aboutReturnFocusEl = null;
     }
 }
 
 function flashThemeBadge(name) {
     const badge = document.getElementById('theme-badge');
+    if (!badge) return;
     badge.textContent = `Theme: ${name}`;
     badge.classList.add('show');
     if (themeBadgeTimeout) {
@@ -1043,13 +1233,15 @@ function applyTheme(themeIndex, announce = true, emitHost = true) {
     document.body.dataset.theme = theme.bodyTheme;
     bloomStrength = theme.bloomStrength;
     refreshPerformanceOverrides();
-    sim.set_theme(currentTheme);
-    document.getElementById('btn-theme').textContent = `THEME: ${theme.name.toUpperCase()}`;
+    if (sim) sim.set_theme(currentTheme);
+    const themeBtn = document.getElementById('btn-theme');
+    if (themeBtn) themeBtn.textContent = `THEME: ${theme.name.toUpperCase()}`;
     needsUpload = true;
     needsRender = true;
     if (emitHost && changed) {
         pushDesktopConfigPatch({ theme: currentTheme });
     }
+    if (changed) markWallpaperApplyDirty();
     if (announce) {
         flashThemeBadge(theme.name);
     }
@@ -1166,6 +1358,7 @@ function paintAt(sx, sy, erase) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function buildCheckboxRow(container, prefix, mask) {
+    if (!container) return;
     container.innerHTML = '';
     for (let i = 0; i <= 8; i++) {
         const item = document.createElement('div');
@@ -1184,6 +1377,7 @@ function buildCheckboxRow(container, prefix, mask) {
 }
 
 function readCheckboxMask(container) {
+    if (!container) return 0;
     let mask = 0;
     const cbs = container.querySelectorAll('input[type="checkbox"]');
     cbs.forEach((cb, i) => {
@@ -1204,10 +1398,11 @@ function setMode(mode) {
         applyPresetScene(1, selectedGenerationsPreset);
     }
     persistDesktopRuleState();
+    markWallpaperApplyDirty();
 }
 
 function applyConwayPreset(name) {
-    const presetName = normalizeConwayPresetName(name);
+    const presetName = normalizeConwayPresetName(name, CONWAY_PRESETS);
     selectedConwayPreset = presetName;
     const p = CONWAY_PRESETS[presetName];
     if (!p) return;
@@ -1218,10 +1413,11 @@ function applyConwayPreset(name) {
     buildCheckboxRow(document.getElementById('birth-row'), 'b', p.b);
     buildCheckboxRow(document.getElementById('survival-row'), 's', p.s);
     persistDesktopRuleState();
+    markWallpaperApplyDirty();
 }
 
 function applyGenPreset(name) {
-    const presetName = normalizeGenerationsPresetName(name);
+    const presetName = normalizeGenerationsPresetName(name, GEN_PRESETS);
     selectedGenerationsPreset = presetName;
     const p = GEN_PRESETS[presetName];
     if (!p) return;
@@ -1233,15 +1429,20 @@ function applyGenPreset(name) {
     if (genPreset) genPreset.value = presetName;
     buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', p.b);
     buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', p.s);
-    document.getElementById('gen-states').value = p.states;
-    document.getElementById('gen-states-val').textContent = p.states;
-    document.getElementById('paint-state').max = p.states - 1;
+    const genStates = document.getElementById('gen-states');
+    const genStatesVal = document.getElementById('gen-states-val');
+    const paintStateInput = document.getElementById('paint-state');
+    const paintStateVal = document.getElementById('paint-state-val');
+    if (genStates) genStates.value = String(p.states);
+    if (genStatesVal) genStatesVal.textContent = String(p.states);
+    if (paintStateInput) paintStateInput.max = String(p.states - 1);
     if (paintState >= p.states) {
         paintState = p.states - 1;
-        document.getElementById('paint-state').value = paintState;
-        document.getElementById('paint-state-val').textContent = paintState;
+        if (paintStateInput) paintStateInput.value = String(paintState);
+        if (paintStateVal) paintStateVal.textContent = String(paintState);
     }
     persistDesktopRuleState();
+    markWallpaperApplyDirty();
 }
 
 function applyPresetScene(mode, name) {
@@ -1263,12 +1464,13 @@ function wireUI() {
 
     // Brush size
     const brushSlider = document.getElementById('brush-size');
-    brushSlider.addEventListener('input', () => {
+    brushSlider?.addEventListener('input', () => {
         brushSize = parseInt(brushSlider.value);
         squareBrushBuffer = new Uint8Array(brushSize * brushSize);
         squareBrushBuffer.fill(paintState);
         squareBrushFillState = paintState;
         document.getElementById('brush-size-val').textContent = brushSize;
+        markWallpaperApplyDirty();
     });
 
     // Brush shape
@@ -1277,23 +1479,25 @@ function wireUI() {
             brushShape = btn.dataset.shape;
             document.querySelectorAll('#brush-shape-toggle .mode-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+            markWallpaperApplyDirty();
         });
     });
 
     // Paint state
     const paintSlider = document.getElementById('paint-state');
-    paintSlider.addEventListener('input', () => {
+    paintSlider?.addEventListener('input', () => {
         paintState = parseInt(paintSlider.value);
         if (squareBrushFillState !== paintState) {
             squareBrushBuffer.fill(paintState);
             squareBrushFillState = paintState;
         }
         document.getElementById('paint-state-val').textContent = paintState;
+        markWallpaperApplyDirty();
     });
 
     // Conway presets
     const conwayPreset = document.getElementById('conway-preset');
-    conwayPreset.addEventListener('change', () => {
+    conwayPreset?.addEventListener('change', () => {
         disableAmbientMode();
         closeMobileSheets();
         applyConwayPreset(conwayPreset.value);
@@ -1304,18 +1508,20 @@ function wireUI() {
     buildCheckboxRow(document.getElementById('birth-row'), 'b', sim.get_birth_mask());
     buildCheckboxRow(document.getElementById('survival-row'), 's', sim.get_survival_mask());
 
-    document.getElementById('birth-row').addEventListener('change', () => {
+    document.getElementById('birth-row')?.addEventListener('change', () => {
         sim.set_birth_rule(readCheckboxMask(document.getElementById('birth-row')));
         persistDesktopRuleState();
+        markWallpaperApplyDirty();
     });
-    document.getElementById('survival-row').addEventListener('change', () => {
+    document.getElementById('survival-row')?.addEventListener('change', () => {
         sim.set_survival_rule(readCheckboxMask(document.getElementById('survival-row')));
         persistDesktopRuleState();
+        markWallpaperApplyDirty();
     });
 
     // Generations presets
     const genPreset = document.getElementById('gen-preset');
-    genPreset.addEventListener('change', () => {
+    genPreset?.addEventListener('change', () => {
         disableAmbientMode();
         closeMobileSheets();
         applyGenPreset(genPreset.value);
@@ -1325,23 +1531,26 @@ function wireUI() {
     buildCheckboxRow(document.getElementById('gen-birth-row'), 'gb', sim.get_birth_mask());
     buildCheckboxRow(document.getElementById('gen-survival-row'), 'gs', sim.get_survival_mask());
 
-    document.getElementById('gen-birth-row').addEventListener('change', () => {
+    document.getElementById('gen-birth-row')?.addEventListener('change', () => {
         sim.set_birth_rule(readCheckboxMask(document.getElementById('gen-birth-row')));
         persistDesktopRuleState();
+        markWallpaperApplyDirty();
     });
-    document.getElementById('gen-survival-row').addEventListener('change', () => {
+    document.getElementById('gen-survival-row')?.addEventListener('change', () => {
         sim.set_survival_rule(readCheckboxMask(document.getElementById('gen-survival-row')));
         persistDesktopRuleState();
+        markWallpaperApplyDirty();
     });
 
     const genStates = document.getElementById('gen-states');
-    genStates.addEventListener('input', () => {
+    genStates?.addEventListener('input', () => {
         const v = parseInt(genStates.value);
         generationsCount = v;
         sim.set_generations(v);
         document.getElementById('gen-states-val').textContent = v;
         document.getElementById('paint-state').max = v - 1;
         persistDesktopRuleState();
+        markWallpaperApplyDirty();
     });
 
 
@@ -1349,6 +1558,8 @@ function wireUI() {
     const btnPlay = document.getElementById('btn-play');
     const btnAmbient = document.getElementById('btn-ambient');
     const btnWallpaperToggle = document.getElementById('btn-wallpaper-toggle');
+    const btnApplyWallpaper = document.getElementById('btn-apply-wallpaper');
+    const btnInteractionProfile = document.getElementById('btn-interaction-profile');
     const btnPresent = document.getElementById('btn-present');
     const btnTheme = document.getElementById('btn-theme');
     const btnExitView = document.getElementById('btn-exit-view');
@@ -1367,7 +1578,7 @@ function wireUI() {
     const btnTouchPaint = document.getElementById('btn-touch-paint');
     const btnTouchErase = document.getElementById('btn-touch-erase');
 
-    btnAbout.addEventListener('click', () => {
+    btnAbout?.addEventListener('click', () => {
         setAboutOpen(true);
     });
 
@@ -1387,57 +1598,79 @@ function wireUI() {
         });
     }
 
-    btnAboutClose.addEventListener('click', () => {
+    if (btnInteractionProfile) {
+        btnInteractionProfile.addEventListener('click', () => {
+            if (!isDesktopRuntime()) return;
+            setInteractionProfile((interactionProfile + 1) % INTERACTION_PROFILES.length, true);
+        });
+    }
+
+    if (btnApplyWallpaper) {
+        btnApplyWallpaper.addEventListener('click', () => {
+            if (!isDesktopRuntime() || !isControlsSurface() || !sim) return;
+            if (!wallpaperApplyDirty || wallpaperApplyPending) return;
+            const settings = buildWallpaperSettingsPatch();
+            if (!settings) return;
+            wallpaperApplyPending = true;
+            updateApplyWallpaperUI();
+            desktopHost.applyWallpaperSettings(settings);
+            window.setTimeout(() => {
+                clearWallpaperApplyDirty();
+            }, 220);
+        });
+    }
+
+    btnAboutClose?.addEventListener('click', () => {
         setAboutOpen(false);
     });
 
-    aboutBackdrop.addEventListener('click', () => {
+    aboutBackdrop?.addEventListener('click', () => {
         setAboutOpen(false);
     });
 
-    mobileBackdrop.addEventListener('click', () => {
+    mobileBackdrop?.addEventListener('click', () => {
         closeMobileSheets();
     });
 
-    btnMobileTools.addEventListener('click', () => {
+    btnMobileTools?.addEventListener('click', () => {
         setMobileSheet('left-panel');
     });
 
-    btnMobileRules.addEventListener('click', () => {
+    btnMobileRules?.addEventListener('click', () => {
         setMobileSheet('right-panel');
     });
 
-    btnMobileControls.addEventListener('click', () => {
+    btnMobileControls?.addEventListener('click', () => {
         setMobileSheet('bottom-bar');
     });
 
-    btnMobileMore.addEventListener('click', () => {
+    btnMobileMore?.addEventListener('click', () => {
         setMobileSheet('top-bar');
     });
 
-    btnMobilePlay.addEventListener('click', () => {
+    btnMobilePlay?.addEventListener('click', () => {
         disableAmbientMode();
         playing = !playing;
         updatePlaybackUI();
         needsRender = true;
     });
 
-    btnTouchPaint.addEventListener('click', () => {
+    btnTouchPaint?.addEventListener('click', () => {
         mobileEraseMode = false;
         updateMobileEraseUI();
     });
 
-    btnTouchErase.addEventListener('click', () => {
+    btnTouchErase?.addEventListener('click', () => {
         mobileEraseMode = true;
         updateMobileEraseUI();
     });
 
-    btnAmbient.addEventListener('click', () => {
+    btnAmbient?.addEventListener('click', () => {
         closeMobileSheets();
         setAmbientMode(!ambientMode);
     });
 
-    btnPresent.addEventListener('click', () => {
+    btnPresent?.addEventListener('click', () => {
         if (ambientMode) {
             disableAmbientMode();
             return;
@@ -1446,7 +1679,7 @@ function wireUI() {
         setPresentationMode(!presentationMode);
     });
 
-    btnExitView.addEventListener('click', () => {
+    btnExitView?.addEventListener('click', () => {
         if (ambientMode) {
             disableAmbientMode();
         } else {
@@ -1454,35 +1687,35 @@ function wireUI() {
         }
     });
 
-    btnTheme.addEventListener('click', () => {
+    btnTheme?.addEventListener('click', () => {
         disableAmbientMode();
         closeMobileSheets();
         cycleTheme();
     });
 
-    btnZoomIn.addEventListener('click', () => {
+    btnZoomIn?.addEventListener('click', () => {
         disableAmbientMode();
         zoomBy(1.2);
     });
 
-    btnZoomOut.addEventListener('click', () => {
+    btnZoomOut?.addEventListener('click', () => {
         disableAmbientMode();
         zoomBy(1 / 1.2);
     });
 
-    btnZoomReset.addEventListener('click', () => {
+    btnZoomReset?.addEventListener('click', () => {
         disableAmbientMode();
         setZoom(1);
     });
 
-    btnPlay.addEventListener('click', () => {
+    btnPlay?.addEventListener('click', () => {
         disableAmbientMode();
         playing = !playing;
         updatePlaybackUI();
         needsRender = true;
     });
 
-    document.getElementById('btn-step').addEventListener('click', () => {
+    document.getElementById('btn-step')?.addEventListener('click', () => {
         disableAmbientMode();
         closeMobileSheets();
         sim.tick_no_render(1);
@@ -1491,7 +1724,7 @@ function wireUI() {
         statsDirty = true;
     });
 
-    document.getElementById('btn-clear').addEventListener('click', () => {
+    document.getElementById('btn-clear')?.addEventListener('click', () => {
         disableAmbientMode();
         closeMobileSheets();
         sim.clear();
@@ -1500,7 +1733,7 @@ function wireUI() {
         statsDirty = true;
     });
 
-    document.getElementById('btn-randomize').addEventListener('click', () => {
+    document.getElementById('btn-randomize')?.addEventListener('click', () => {
         disableAmbientMode();
         closeMobileSheets();
         const density = 0.3;
@@ -1512,13 +1745,13 @@ function wireUI() {
 
     // Speed
     const speedSlider = document.getElementById('speed');
-    speedSlider.addEventListener('input', () => {
+    speedSlider?.addEventListener('input', () => {
         disableAmbientMode();
-        setSpeed(speedFromSlider(parseInt(speedSlider.value)), false);
+        setSpeed(speedFromSlider(parseInt(speedSlider.value), SPEED_SLIDER_MAX, MAX_SPEED), false);
     });
 
     // Export PNG
-    document.getElementById('btn-export').addEventListener('click', () => {
+    document.getElementById('btn-export')?.addEventListener('click', () => {
         closeMobileSheets();
         if (needsUpload) {
             uploadPixels();
@@ -1534,7 +1767,7 @@ function wireUI() {
         });
     });
 
-    document.getElementById('btn-random-rule').addEventListener('click', () => {
+    document.getElementById('btn-random-rule')?.addEventListener('click', () => {
         disableAmbientMode();
         closeMobileSheets();
         const b = Math.floor(Math.random() * 512);
@@ -1553,6 +1786,7 @@ function wireUI() {
         needsUpload = true;
         needsRender = true;
         statsDirty = true;
+        markWallpaperApplyDirty();
     });
 }
 
@@ -1561,6 +1795,7 @@ function wireUI() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupInput() {
+    if (!canvas) return;
     let lastPaintTime = 0;
 
     canvas.addEventListener('mousedown', (e) => {
@@ -1695,6 +1930,7 @@ function setupInput() {
     }, { passive: false });
 
     window.addEventListener('keydown', (e) => {
+        if (trapAboutFocus(e)) return;
         if (e.key === 'Escape') {
             setAboutOpen(false);
         } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
@@ -1761,8 +1997,10 @@ function setupInput() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function updateStats() {
-    document.getElementById('stat-pop').textContent = sim.get_population().toLocaleString();
-    document.getElementById('stat-gen').textContent = Number(sim.get_generation()).toLocaleString();
+    const statPop = document.getElementById('stat-pop');
+    const statGen = document.getElementById('stat-gen');
+    if (statPop) statPop.textContent = sim.get_population().toLocaleString();
+    if (statGen) statGen.textContent = Number(sim.get_generation()).toLocaleString();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1787,6 +2025,7 @@ function gameLoop(timestamp) {
     const desktopHidden =
         isDesktopRuntime() &&
         wallpaperSessionActive &&
+        !isControlsSurface() &&
         !desktopViewportActive;
     if (desktopHidden) {
         tickAccumulator = 0;
@@ -1881,7 +2120,7 @@ async function main() {
     detectAutoTargetResolution();
     if (savedMode === 'manual' && Number.isFinite(savedValue) && savedValue > 0) {
         resolutionMode = 'manual';
-        sim.set_grid_size(clampToTier(savedValue), clampToTier(savedValue));
+        sim.set_grid_size(clampToTier(savedValue, GRID_TIERS), clampToTier(savedValue, GRID_TIERS));
         syncGridDimensions();
     } else {
         resolutionMode = 'auto';
@@ -1923,9 +2162,13 @@ async function main() {
     // Wire UI and input
     wireUI();
     setupInput();
+    setupLayoutObservers();
     setMobileUI(window.innerWidth <= 760);
+    syncDesktopLayoutMetrics();
     updatePlaybackUI();
     updateWallpaperToggleUI();
+    updateInteractionProfileUI();
+    updateApplyWallpaperUI();
     updateMobileEraseUI();
     if (desktopPendingConfig) {
         applyDesktopConfig(desktopPendingConfig);

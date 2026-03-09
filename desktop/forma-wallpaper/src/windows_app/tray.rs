@@ -16,6 +16,9 @@ pub(super) fn sync_tray_checks(ui: &TrayUiState, config: &AppConfig, wallpaper_e
     ui.theme_1.set_checked(config.theme == 1);
     ui.theme_2.set_checked(config.theme == 2);
     ui.theme_3.set_checked(config.theme == 3);
+    ui.profile_subtle.set_checked(config.interaction_profile == 0);
+    ui.profile_balanced.set_checked(config.interaction_profile == 1);
+    ui.profile_expressive.set_checked(config.interaction_profile == 2);
 }
 
 pub(super) fn create_tray_icon(
@@ -23,13 +26,13 @@ pub(super) fn create_tray_icon(
     wallpaper_enabled: bool,
 ) -> Result<(tray_icon::TrayIcon, TrayMenuIds, TrayUiState)> {
     let menu = Menu::new();
-    let controls_item = MenuItem::new("Open Controls Window", true, None);
-    let wallpaper_item = CheckMenuItem::new("Wallpaper Enabled", true, wallpaper_enabled, None);
-    let startup_item = CheckMenuItem::new("Launch at Startup", true, config.startup_enabled, None);
-    let check_updates_item = MenuItem::new("Check for Updates", true, None);
-    let export_diag_item = MenuItem::new("Export Diagnostics", true, None);
+    let controls_item = MenuItem::new("Open Control Window", true, None);
+    let wallpaper_item = CheckMenuItem::new("Wallpaper Active", true, wallpaper_enabled, None);
+    let startup_item = CheckMenuItem::new("Start with Windows", true, config.startup_enabled, None);
+    let check_updates_item = MenuItem::new("Check for Updates...", true, None);
+    let export_diag_item = MenuItem::new("Export Diagnostics...", true, None);
     let open_logs_item = MenuItem::new("Open Logs Folder", true, None);
-    let about_item = MenuItem::new("About Forma Wallpaper", true, None);
+    let about_item = MenuItem::new("About Forma", true, None);
 
     let res_512 = CheckMenuItem::new("512", true, config.resolution == 512, None);
     let res_768 = CheckMenuItem::new("768", true, config.resolution == 768, None);
@@ -46,6 +49,16 @@ pub(super) fn create_tray_icon(
     let theme_2 = CheckMenuItem::new("Bio", true, config.theme == 2, None);
     let theme_3 = CheckMenuItem::new("Mono", true, config.theme == 3, None);
     let theme_menu = Submenu::with_items("Theme", true, &[&theme_0, &theme_1, &theme_2, &theme_3])?;
+    let profile_subtle = CheckMenuItem::new("Subtle", true, config.interaction_profile == 0, None);
+    let profile_balanced =
+        CheckMenuItem::new("Balanced", true, config.interaction_profile == 1, None);
+    let profile_expressive =
+        CheckMenuItem::new("Expressive", true, config.interaction_profile == 2, None);
+    let interaction_menu = Submenu::with_items(
+        "Interaction",
+        true,
+        &[&profile_subtle, &profile_balanced, &profile_expressive],
+    )?;
     let exit_item = MenuItem::new("Exit", true, None);
     let separator = PredefinedMenuItem::separator();
 
@@ -57,6 +70,7 @@ pub(super) fn create_tray_icon(
     menu.append(&resolution_menu)?;
     menu.append(&fps_menu)?;
     menu.append(&theme_menu)?;
+    menu.append(&interaction_menu)?;
     menu.append(&open_logs_item)?;
     menu.append(&about_item)?;
     menu.append(&separator)?;
@@ -86,6 +100,9 @@ pub(super) fn create_tray_icon(
         theme_1: theme_1.id().clone(),
         theme_2: theme_2.id().clone(),
         theme_3: theme_3.id().clone(),
+        profile_subtle: profile_subtle.id().clone(),
+        profile_balanced: profile_balanced.id().clone(),
+        profile_expressive: profile_expressive.id().clone(),
         open_logs: open_logs_item.id().clone(),
         about: about_item.id().clone(),
         exit: exit_item.id().clone(),
@@ -103,6 +120,9 @@ pub(super) fn create_tray_icon(
         theme_1,
         theme_2,
         theme_3,
+        profile_subtle,
+        profile_balanced,
+        profile_expressive,
     };
     Ok((tray, ids, ui))
 }
