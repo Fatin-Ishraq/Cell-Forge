@@ -4,237 +4,316 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description"
-        content="Forma is an interactive cellular automata sandbox with Conway and Generations rules, ambient viewing mode, theme switching, zoom, and PNG export.">
-    <meta name="theme-color" content="#071118">
-    <meta property="og:title" content="Forma">
-    <meta property="og:description"
-        content="Interactive cellular automata sandbox with Conway, Generations, ambient mode, themes, zoom, and PNG export.">
+    <meta name="description" content="Forma is a real-time cellular automata engine that runs as a native Windows wallpaper. Built with Rust + WebAssembly.">
+    <meta name="theme-color" content="#040810">
+    <meta property="og:title" content="Forma — Cellular Automata, Alive on Your Desktop">
+    <meta property="og:description" content="Real-time cellular automata engine with Conway & Generations modes, 4 visual themes, and native Windows wallpaper support.">
     <meta property="og:type" content="website">
-    <title>Forma — Cellular Automata Sandbox</title>
+    <meta property="og:image" content="forma-live.png">
+    <title>Forma — Cellular Automata, Alive on Your Desktop</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
-        rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="site.css">
 </head>
 
 <body>
-    <!-- Onboarding overlay -->
-    <div id="overlay">
-        <span id="overlay-title">FORMA</span>
-        <span id="overlay-sub">cellular automata sandbox</span>
-    </div>
-
-    <!-- Main canvas -->
-    <canvas id="canvas"></canvas>
-    <button id="btn-exit-view" class="btn" title="Exit presentation view">EXIT</button>
-    <div id="mobile-sheet-backdrop"></div>
-
-    <div id="mobile-bar" class="panel">
-        <button id="btn-mobile-tools" class="btn">TOOLS</button>
-        <button id="btn-mobile-rules" class="btn">RULES</button>
-        <button id="btn-mobile-play" class="btn accent">⏸</button>
-        <button id="btn-mobile-controls" class="btn">CTRL</button>
-        <button id="btn-mobile-more" class="btn">MORE</button>
-    </div>
-
-    <!-- Top Bar -->
-    <div id="top-bar" class="panel">
-        <div class="panel-section panel-section-session">
-            <span class="section-kicker">Session</span>
-            <button id="btn-wallpaper-toggle" class="btn" aria-pressed="false" title="Toggle desktop wallpaper mode" style="display:none">WALLPAPER: OFF</button>
-            <button id="btn-apply-wallpaper" class="btn" title="Apply current controls state to wallpaper" style="display:none">SET WALLPAPER</button>
-            <button id="btn-interaction-profile" class="btn" title="Cycle wallpaper interaction profile" style="display:none">INTERACT: BALANCED</button>
-            <button id="btn-present" class="btn" aria-pressed="false" title="Toggle presentation mode">PRESENT</button>
-        </div>
-        <div class="panel-section panel-section-canvas">
-            <span class="section-kicker">Canvas</span>
-            <button id="btn-ambient" class="btn" aria-pressed="false" title="Toggle ambient mode (A)">AMBIENT</button>
-            <button id="btn-theme" class="btn" title="Cycle visual theme (D)">THEME: LAB</button>
-            <button id="btn-export" class="btn" title="Export grid as PNG">EXPORT</button>
-            <button id="btn-random-rule" class="btn accent" title="Randomize rules and grid">RANDOM RULE</button>
-        </div>
-        <div class="panel-section panel-section-system">
-            <span class="section-kicker">System</span>
-            <button id="btn-about" class="btn" aria-pressed="false" title="Help and shortcuts">HELP</button>
-        </div>
-    </div>
-
-    <div id="zoom-panel" class="panel">
-        <label class="panel-label">ZOOM <span id="zoom-val">1.00x</span></label>
-        <div class="mode-toggle" id="zoom-controls">
-            <button id="btn-zoom-out" class="mode-btn" title="Zoom out">-</button>
-            <button id="btn-zoom-reset" class="mode-btn" title="Reset zoom">1x</button>
-            <button id="btn-zoom-in" class="mode-btn" title="Zoom in">+</button>
-        </div>
-    </div>
-
-    <!-- Left Panel — Tools -->
-    <div id="left-panel" class="panel">
-        <div class="panel-header">TOOLS</div>
-
-        <label class="panel-label">MODE</label>
-        <div class="mode-toggle" id="mode-toggle">
-            <button class="mode-btn active" data-mode="0">CONWAY</button>
-            <button class="mode-btn" data-mode="1">GENERATIONS</button>
-        </div>
-
-        <label class="panel-label">BRUSH SIZE <span id="brush-size-val">4</span>px</label>
-        <input type="range" id="brush-size" min="1" max="64" value="4">
-
-        <label class="panel-label">BRUSH SHAPE</label>
-        <div class="mode-toggle" id="brush-shape-toggle">
-            <button class="mode-btn active" data-shape="square">SQ</button>
-            <button class="mode-btn" data-shape="circle">●</button>
-            <button class="mode-btn" data-shape="spray">⁘</button>
-        </div>
-
-        <div id="touch-mode-section" class="mobile-only">
-            <label class="panel-label">TOUCH MODE</label>
-            <div class="mode-toggle" id="touch-mode-toggle">
-                <button id="btn-touch-paint" class="mode-btn active" type="button">PAINT</button>
-                <button id="btn-touch-erase" class="mode-btn" type="button">ERASE</button>
+    <!-- ═══════════ HERO ═══════════ -->
+    <section class="hero" id="hero">
+        <canvas id="hero-canvas"></canvas>
+        <div class="hero-overlay"></div>
+        <div class="hero-content">
+            <div class="hero-badge reveal">
+                <span class="dot"></span>
+                <span>Open Source Cellular Automata Engine</span>
+            </div>
+            <h1 class="reveal reveal-delay-1">FORMA</h1>
+            <p class="hero-sub reveal reveal-delay-2">Cellular automata, alive on your desktop</p>
+            <div class="hero-ctas reveal reveal-delay-3">
+                <a href="sandbox/" class="btn-primary" id="cta-sandbox">▶ Try in Browser</a>
+                <a href="https://github.com/Fatin-Ishraq/Forma/releases/latest" class="btn-ghost" id="cta-download" target="_blank" rel="noopener">⬇ Download for Windows</a>
             </div>
         </div>
-
-        <div id="paint-state-section" style="display:none">
-            <label class="panel-label">PAINT STATE <span id="paint-state-val">1</span></label>
-            <input type="range" id="paint-state" min="0" max="20" value="1">
+        <div class="scroll-hint" id="scroll-hint">
+            <span>Scroll</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
         </div>
-    </div>
+    </section>
 
-    <!-- Right Panel — Rules -->
-    <div id="right-panel" class="panel">
-        <div class="panel-header">RULES</div>
+    <!-- ═══════════ FEATURES ═══════════ -->
+    <section class="section features-section" id="features">
+        <div class="container">
+            <span class="section-label reveal">Capabilities</span>
+            <h2 class="section-title reveal reveal-delay-1">What Makes Forma Special</h2>
+            <p class="section-desc reveal reveal-delay-2">A simulation engine designed for beauty, performance, and exploration.</p>
 
-        <!-- Conway rules -->
-        <div id="conway-rules" class="rules-section" style="display:none">
-            <label class="panel-label">PRESET</label>
-            <select id="conway-preset">
-                <option value="life">Conway's Life (B3/S23)</option>
-                <option value="highlife">HighLife (B36/S23)</option>
-                <option value="daynight">Day & Night (B3678/S34678)</option>
-                <option value="seeds">Seeds (B2/S)</option>
-                <option value="maze">Maze (B3/S12345)</option>
-                <option value="replicator">Replicator (B1357/S1357)</option>
-                <option value="34life">34 Life (B34/S34)</option>
-            </select>
-
-            <label class="panel-label">BIRTH (neighbors)</label>
-            <div class="checkbox-row" id="birth-row"></div>
-
-            <label class="panel-label">SURVIVAL (neighbors)</label>
-            <div class="checkbox-row" id="survival-row"></div>
-        </div>
-
-        <!-- Generations rules -->
-        <div id="generations-rules" class="rules-section" style="display:none">
-            <label class="panel-label">PRESET</label>
-            <select id="gen-preset">
-                <option value="brians">Brian's Brain (B2/S/3)</option>
-                <option value="starwars">Star Wars (B2/S345/4)</option>
-                <option value="fireworld">Fireworld (B2/S34/8)</option>
-                <option value="pulse">Pulse (B2/S/4)</option>
-                <option value="dune">Dune (B2/S23/6)</option>
-                <option value="tides">Tides (B2/S346/8)</option>
-                <option value="frost">Frost (B2/S125/9)</option>
-                <option value="lattice">Lattice (B34/S234/6)</option>
-                <option value="echo">Echo (B2/S24/10)</option>
-                <option value="cathedral">Cathedral (B2/S1234/16)</option>
-            </select>
-
-            <label class="panel-label">BIRTH (neighbors)</label>
-            <div class="checkbox-row" id="gen-birth-row"></div>
-
-            <label class="panel-label">SURVIVAL (neighbors)</label>
-            <div class="checkbox-row" id="gen-survival-row"></div>
-
-            <label class="panel-label">STATES <span id="gen-states-val">3</span></label>
-            <input type="range" id="gen-states" min="2" max="20" value="3">
-        </div>
-    </div>
-
-    <!-- Bottom Bar -->
-    <div id="bottom-bar" class="panel">
-        <div class="panel-section controls">
-            <button id="btn-play" class="btn accent" title="Play/Pause simulation">▶ PLAY</button>
-            <button id="btn-step" class="btn" title="Advance one step">⏭ STEP</button>
-            <button id="btn-clear" class="btn" title="Clear all cells">CLEAR</button>
-            <button id="btn-randomize" class="btn" title="Randomize grid">RANDOM</button>
-        </div>
-        <div class="panel-section">
-            <label class="panel-label">SPEED <span id="speed-val">30</span> t/s</label>
-            <input type="range" id="speed" min="0" max="100" value="62">
-        </div>
-        <div class="panel-section stats">
-            <span class="stat">POP <span id="stat-pop" class="stat-val">0</span></span>
-            <span class="stat">GEN <span id="stat-gen" class="stat-val">0</span></span>
-            <span class="stat">FPS <span id="stat-fps" class="stat-val">0</span></span>
-        </div>
-    </div>
-
-    <div id="theme-badge" aria-live="polite"></div>
-
-    <div id="about-modal" aria-hidden="true">
-        <div id="about-backdrop"></div>
-        <section id="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
-            <div class="about-top">
-                <div>
-                    <div class="about-kicker">ABOUT FORMA</div>
-                    <h2 id="about-title">Cellular automata sandbox</h2>
+            <div class="features-grid">
+                <div class="feature-card reveal reveal-delay-1">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M11 8h5a2 2 0 0 1 2 2v1M13 16H8a2 2 0 0 1-2-2v-1"/></svg>
+                    </div>
+                    <h3>Dual Simulation Engines</h3>
+                    <p>Conway's Game of Life and multi-state Generations mode, with 17 handcrafted presets to explore.</p>
                 </div>
-                <button id="btn-about-close" class="btn" type="button" title="Close about panel">CLOSE</button>
+                <div class="feature-card reveal reveal-delay-2">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="17" r="2"/><circle cx="6" cy="12" r="3"/><path d="M12 12l4 4M6 15l7-2"/></svg>
+                    </div>
+                    <h3>4 Visual Themes</h3>
+                    <p>Lab, Ember, Bio, and Mono — each with its own color palette, UI personality, and visual effects.</p>
+                </div>
+                <div class="feature-card reveal reveal-delay-3">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                    </div>
+                    <h3>Native Wallpaper</h3>
+                    <p>Runs behind your desktop icons as a native Windows wallpaper via WorkerW embedding. Truly living art.</p>
+                </div>
+                <div class="feature-card reveal reveal-delay-1">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                    </div>
+                    <h3>WASM Performance</h3>
+                    <p>Rust simulation core compiled to WebAssembly and rendered with WebGL. Smooth 60fps on million-cell grids.</p>
+                </div>
+                <div class="feature-card reveal reveal-delay-2">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                    </div>
+                    <h3>Full Interaction</h3>
+                    <p>Paint, erase, zoom, and pan with mouse, touch, or keyboard. Three brush shapes and adjustable sizes.</p>
+                </div>
+                <div class="feature-card reveal reveal-delay-3">
+                    <div class="feature-icon">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                    </div>
+                    <h3>PNG Export</h3>
+                    <p>Snapshot your creation at full resolution. Every frame is a potential wallpaper or generative art piece.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════ THEMES ═══════════ -->
+    <section class="section themes-section" id="themes">
+        <div class="container">
+            <span class="section-label reveal">Visual Identity</span>
+            <h2 class="section-title reveal reveal-delay-1">Four Worlds</h2>
+            <p class="section-desc reveal reveal-delay-2">Each theme transforms the entire experience — colors, UI shapes, visual effects, and mood.</p>
+
+            <div class="theme-tabs reveal reveal-delay-3">
+                <button class="theme-tab active" data-theme="lab" id="tab-lab">Lab</button>
+                <button class="theme-tab" data-theme="ember" id="tab-ember">Ember</button>
+                <button class="theme-tab" data-theme="bio" id="tab-bio">Bio</button>
+                <button class="theme-tab" data-theme="mono" id="tab-mono">Mono</button>
             </div>
 
-            <div class="about-grid">
-                <section class="about-section">
-                    <h3>What this is</h3>
-                    <p>Forma is a real-time cellular automata canvas for both desktop wallpaper mode and controls mode. You can paint directly with cursor movement, tune rules, then return to a clean wallpaper view with no on-screen controls.</p>
-                </section>
-
-                <section class="about-section">
-                    <h3>Desktop workflow</h3>
-                    <p><strong>Wallpaper mode</strong>: no visible UI, reactive cursor painting, low-overhead behavior when the desktop is not visible.</p>
-                    <p><strong>Controls mode</strong>: full editor panels for rules, speed, brush, and visual theme adjustments.</p>
-                    <p>Use the system tray to toggle wallpaper state, open controls, and adjust desktop settings instantly.</p>
-                </section>
-
-                <section class="about-section">
-                    <h3>Modes</h3>
-                    <p><strong>Conway</strong>: classic life-like automata using birth and survival masks such as <code>B3/S23</code>.</p>
-                    <p><strong>Generations</strong>: living cells age through multiple states, leaving structured trails and pulses.</p>
-                    <p><strong>Ambient</strong>: a calmer viewing mode with a curated seed, slow speed, hidden UI, and gentle camera drift.</p>
-                </section>
-
-                <section class="about-section">
-                    <h3>Controls</h3>
-                    <p><strong>Left drag</strong>: paint</p>
-                    <p><strong>Right drag</strong>: erase</p>
-                    <p><strong>Middle drag</strong>: pan</p>
-                    <p><strong>Wheel</strong>: zoom</p>
-                    <p><strong>Touch</strong>: one finger paints, two fingers pan and pinch to zoom</p>
-                    <p><strong>Zoom buttons</strong>: step in, out, or reset</p>
-                </section>
-
-                <section class="about-section">
-                    <h3>Shortcuts</h3>
-                    <p><strong>A</strong>: toggle ambient mode</p>
-                    <p><strong>D</strong>: cycle theme</p>
-                    <p><strong>F</strong>: toggle presentation mode</p>
-                    <p><strong>Space</strong>: play/pause simulation</p>
-                    <p><strong>R</strong>: cycle resolution mode (auto, 512, 1024)</p>
-                    <p><strong>+</strong> / <strong>-</strong>: zoom in or out</p>
-                    <p><strong>0</strong>: reset zoom</p>
-                    <p><strong>?</strong>: open About</p>
-                    <p><strong>Esc</strong>: close About</p>
-                </section>
+            <div class="theme-display reveal reveal-delay-4">
+                <div class="theme-preview" id="theme-preview">
+                    <div class="theme-preview-inner" data-theme="lab" style="color:#4ee8ff"></div>
+                    <div class="theme-preview-inner hidden" data-theme="ember" style="color:#ff9f43"></div>
+                    <div class="theme-preview-inner hidden" data-theme="bio" style="color:#66ffb3"></div>
+                    <div class="theme-preview-inner hidden" data-theme="mono" style="color:#f3f3f3"></div>
+                </div>
+                <div class="theme-info" id="theme-info">
+                    <h3 id="theme-name" style="color: var(--lab-accent)">Lab</h3>
+                    <p class="theme-tagline" id="theme-tagline">Cyan diagnostics on midnight silicon</p>
+                    <p id="theme-desc">A clinical, high-contrast theme inspired by laboratory displays and diagnostic interfaces. Sharp corners and glowing cyan accents cut through deep navy darkness.</p>
+                    <div class="theme-palette" id="theme-palette">
+                        <div class="theme-swatch" style="background:#071118"></div>
+                        <div class="theme-swatch" style="background:#4ee8ff"></div>
+                        <div class="theme-swatch" style="background:#eef7ff"></div>
+                        <div class="theme-swatch" style="background:rgba(78,232,255,0.14)"></div>
+                    </div>
+                </div>
             </div>
-        </section>
-    </div>
+        </div>
+    </section>
 
-    <script type="module" src="main.js"></script>
+    <!-- ═══════════ PRESETS ═══════════ -->
+    <section class="section presets-section" id="presets">
+        <div class="container">
+            <span class="section-label reveal">Exploration</span>
+            <h2 class="section-title reveal reveal-delay-1">17 Universes to Explore</h2>
+            <p class="section-desc reveal reveal-delay-2">From Conway's classic Life to exotic multi-state systems. Each preset creates entirely different emergent behavior.</p>
+        </div>
+        <div class="presets-scroll reveal reveal-delay-3" id="presets-scroll">
+            <!-- Conway presets -->
+            <a class="preset-card" href="sandbox/?preset=life">
+                <span class="preset-badge conway">Conway</span>
+                <h4>Conway's Life</h4>
+                <span class="preset-rule">B3 / S23</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=highlife">
+                <span class="preset-badge conway">Conway</span>
+                <h4>HighLife</h4>
+                <span class="preset-rule">B36 / S23</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=daynight">
+                <span class="preset-badge conway">Conway</span>
+                <h4>Day & Night</h4>
+                <span class="preset-rule">B3678 / S34678</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=seeds">
+                <span class="preset-badge conway">Conway</span>
+                <h4>Seeds</h4>
+                <span class="preset-rule">B2 / S</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=maze">
+                <span class="preset-badge conway">Conway</span>
+                <h4>Maze</h4>
+                <span class="preset-rule">B3 / S12345</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=replicator">
+                <span class="preset-badge conway">Conway</span>
+                <h4>Replicator</h4>
+                <span class="preset-rule">B1357 / S1357</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=34life">
+                <span class="preset-badge conway">Conway</span>
+                <h4>34 Life</h4>
+                <span class="preset-rule">B34 / S34</span>
+            </a>
+            <!-- Generations presets -->
+            <a class="preset-card" href="sandbox/?preset=brians">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Brian's Brain</h4>
+                <span class="preset-rule">B2 / S / 3</span>
+                <span class="preset-states">3 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=starwars">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Star Wars</h4>
+                <span class="preset-rule">B2 / S345 / 4</span>
+                <span class="preset-states">4 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=fireworld">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Fireworld</h4>
+                <span class="preset-rule">B2 / S34 / 8</span>
+                <span class="preset-states">8 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=pulse">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Pulse</h4>
+                <span class="preset-rule">B2 / S / 4</span>
+                <span class="preset-states">4 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=dune">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Dune</h4>
+                <span class="preset-rule">B2 / S23 / 6</span>
+                <span class="preset-states">6 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=tides">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Tides</h4>
+                <span class="preset-rule">B2 / S346 / 8</span>
+                <span class="preset-states">8 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=frost">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Frost</h4>
+                <span class="preset-rule">B2 / S125 / 9</span>
+                <span class="preset-states">9 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=lattice">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Lattice</h4>
+                <span class="preset-rule">B34 / S234 / 6</span>
+                <span class="preset-states">6 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=echo">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Echo</h4>
+                <span class="preset-rule">B2 / S24 / 10</span>
+                <span class="preset-states">10 states</span>
+            </a>
+            <a class="preset-card" href="sandbox/?preset=cathedral">
+                <span class="preset-badge generations">Generations</span>
+                <h4>Cathedral</h4>
+                <span class="preset-rule">B2 / S1234 / 16</span>
+                <span class="preset-states">16 states</span>
+            </a>
+        </div>
+    </section>
+
+    <!-- ═══════════ DESKTOP APP ═══════════ -->
+    <section class="section desktop-section" id="desktop">
+        <div class="container">
+            <div class="desktop-grid">
+                <div class="desktop-mockup reveal">
+                    <img src="desktop-mockup.png" alt="Forma running as a Windows desktop wallpaper" loading="lazy" width="1200" height="750">
+                </div>
+                <div class="desktop-info">
+                    <span class="section-label reveal">Desktop App</span>
+                    <h3 class="reveal reveal-delay-1">Your Living Wallpaper</h3>
+                    <p class="section-desc reveal reveal-delay-2">Forma embeds directly behind your desktop icons as a native Windows wallpaper. It auto-recovers when Explorer restarts, runs from the system tray, and remembers your settings.</p>
+                    <ul class="desktop-features reveal reveal-delay-3">
+                        <li>System tray controls for resolution, FPS cap, and theme</li>
+                        <li>Toggle between wallpaper mode and full control window</li>
+                        <li>Three interaction profiles: Subtle, Balanced, Expressive</li>
+                        <li>Automatic recovery from Explorer host resets</li>
+                        <li>Persistent settings and structured diagnostic logs</li>
+                        <li>Auto-start with Windows option</li>
+                    </ul>
+                    <a href="https://github.com/Fatin-Ishraq/Forma/releases/latest" class="btn-primary reveal reveal-delay-4" id="cta-download-2" target="_blank" rel="noopener">⬇ Download for Windows</a>
+                    <p class="download-meta reveal reveal-delay-5">Windows 10/11 · x64 · Requires WebView2 Runtime</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════ TECH STACK ═══════════ -->
+    <section class="section tech-section" id="tech">
+        <div class="container">
+            <span class="section-label reveal">Under the Hood</span>
+            <h2 class="section-title reveal reveal-delay-1" style="text-align:center; margin-left:auto; margin-right:auto;">Built With</h2>
+            <p class="section-desc reveal reveal-delay-2" style="text-align:center; margin-left:auto; margin-right:auto;">From low-level simulation to pixel-perfect rendering.</p>
+
+            <div class="tech-flow reveal reveal-delay-3">
+                <div class="tech-node">
+                    <span>🦀</span>
+                    <span>Rust</span>
+                </div>
+                <span class="tech-arrow">→</span>
+                <div class="tech-node">
+                    <span>📦</span>
+                    <span>wasm-pack</span>
+                </div>
+                <span class="tech-arrow">→</span>
+                <div class="tech-node">
+                    <span>⚡</span>
+                    <span>WebAssembly</span>
+                </div>
+                <span class="tech-arrow">→</span>
+                <div class="tech-node">
+                    <span>🎨</span>
+                    <span>WebGL</span>
+                </div>
+                <span class="tech-arrow">→</span>
+                <div class="tech-node">
+                    <span>🖥️</span>
+                    <span>WebView2</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════ FOOTER ═══════════ -->
+    <footer class="footer" id="footer">
+        <div class="container">
+            <div class="footer-logo">FORMA</div>
+            <p class="footer-tagline">Cellular automata, alive on your desktop</p>
+            <nav class="footer-links">
+                <a href="https://github.com/Fatin-Ishraq/Forma" target="_blank" rel="noopener">GitHub</a>
+                <a href="sandbox/">Sandbox</a>
+                <a href="https://github.com/Fatin-Ishraq/Forma/releases/latest" target="_blank" rel="noopener">Download</a>
+                <a href="https://github.com/Fatin-Ishraq/Forma/issues" target="_blank" rel="noopener">Issues</a>
+            </nav>
+            <p class="footer-credit">Made by Fatin Ishraq</p>
+        </div>
+    </footer>
+
+    <script src="site.js"></script>
 </body>
 
 </html>

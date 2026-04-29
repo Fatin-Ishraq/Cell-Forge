@@ -33,7 +33,7 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build wasm package
-        run: wasm-pack build --target web --out-dir www/pkg
+        run: wasm-pack build --target web --out-dir www/sandbox/pkg
 
       - name: Prepare Pages artifact
         run: |
